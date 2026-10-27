@@ -44,12 +44,17 @@ class ModelConfig:
     ``fusion_layout`` selects the GridNet memory format: "channels_last" runs
     its convolutions on cudnn's NHWC path, "nchw" keeps the original layout.
     Also a rounding-only difference.
+
+    ``flow_pass`` selects how the flow network is run: "bidir" predicts both
+    directions in one pass, which needs about twice the VRAM at the flow stage,
+    "separate" runs the network twice and keeps the original peak.
     """
 
     precision: str
     gpu_index: int
     attention: str
     fusion_layout: str
+    flow_pass: str
 
 
 @dataclasses.dataclass(frozen=True)
@@ -240,6 +245,12 @@ def load_config(path: pathlib.Path, root: pathlib.Path | None = None) -> Config:
             "model",
             "fusion_layout",
             ("channels_last", "nchw"),
+        ),
+        flow_pass=_require_choice(
+            _get(model_raw, "model", "flow_pass", "bidir"),
+            "model",
+            "flow_pass",
+            ("bidir", "separate"),
         ),
     )
 

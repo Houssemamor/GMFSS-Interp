@@ -1,6 +1,6 @@
 """Tests for configuration defaults and validation.
 
-The [model] section grew two performance switches; these tests pin both the
+The [model] section grew three performance switches; these tests pin both the
 defaults (so a missing key keeps the fast path) and the rejection of unknown
 values (so a typo fails before a render starts rather than silently falling back
 to whichever path the code happens to default to).
@@ -34,17 +34,20 @@ class LoadConfigTests(unittest.TestCase):
         config = config_module.load_config(self.write(SECTIONS), root=self.root)
         self.assertEqual(config.model.attention, "sdpa")
         self.assertEqual(config.model.fusion_layout, "channels_last")
+        self.assertEqual(config.model.flow_pass, "bidir")
         self.assertEqual(config.model.precision, "fp32")
 
     def test_model_values_are_read(self) -> None:
         body = SECTIONS.replace(
             "[model]",
-            '[model]\nprecision = "fp16"\nattention = "reference"\nfusion_layout = "nchw"',
+            '[model]\nprecision = "fp16"\nattention = "reference"\n'
+            'fusion_layout = "nchw"\nflow_pass = "separate"',
         )
         config = config_module.load_config(self.write(body), root=self.root)
         self.assertEqual(config.model.precision, "fp16")
         self.assertEqual(config.model.attention, "reference")
         self.assertEqual(config.model.fusion_layout, "nchw")
+        self.assertEqual(config.model.flow_pass, "separate")
 
     def test_unknown_attention_is_rejected(self) -> None:
         body = SECTIONS.replace("[model]", '[model]\nattention = "flash"')
@@ -57,6 +60,12 @@ class LoadConfigTests(unittest.TestCase):
         with self.assertRaises(config_module.ConfigError) as caught:
             config_module.load_config(self.write(body), root=self.root)
         self.assertIn("fusion_layout", str(caught.exception))
+
+    def test_unknown_flow_pass_is_rejected(self) -> None:
+        body = SECTIONS.replace("[model]", '[model]\nflow_pass = "single"')
+        with self.assertRaises(config_module.ConfigError) as caught:
+            config_module.load_config(self.write(body), root=self.root)
+        self.assertIn("flow_pass", str(caught.exception))
 
     def test_missing_section_is_rejected(self) -> None:
         with self.assertRaises(config_module.ConfigError) as caught:
