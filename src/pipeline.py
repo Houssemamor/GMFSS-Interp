@@ -333,7 +333,12 @@ def run(
             sink.write(first)
             stats.frames_written += 1
             previous_frame = first
-            previous_stats = dedup_module.analyse(first)
+            # The block map is only needed by "diff" dedup and by scene
+            # detection. In the common defaults (exact dedup, scenes on) that
+            # still means every frame, but a run with scenes off and exact
+            # dedup now costs no analysis at all.
+            needs_luma = config.dedup.mode == "diff" or config.scene.enabled
+            previous_stats = dedup_module.analyse(first) if needs_luma else None
 
             last_report = time.monotonic()
             while True:
@@ -342,7 +347,7 @@ def run(
                     break
 
                 stats.pairs += 1
-                current_stats = dedup_module.analyse(frame)
+                current_stats = dedup_module.analyse(frame) if needs_luma else None
 
                 duplicate = dedup_module.is_duplicate(
                     previous_frame,
