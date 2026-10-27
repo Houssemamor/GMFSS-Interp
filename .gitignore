@@ -13,3 +13,7 @@ __pycache__/
 *.mkv
 *.mp4
 *.part.*
+
+# Temporary files created by the IDE.
+.idea/
+.planning/

@@ -343,6 +343,7 @@ def run(
             # dedup now costs no analysis at all.
             needs_luma = config.dedup.mode == "diff" or config.scene.enabled
             previous_stats = dedup_module.analyse(first) if needs_luma else None
+            previous_feature_state = None  # reused between overlapping pairs
 
             last_report = time.monotonic()
             while True:
@@ -384,11 +385,14 @@ def run(
                         sink.write(previous_frame)
                         stats.frames_written += 1
                 else:
-                    for intermediate in backend.interpolate(
-                        previous_frame, frame, plan.timesteps
-                    ):
+                    interpolate_result, feature_state = backend.interpolate(
+                        previous_frame, frame, plan.timesteps, previous_feature_state
+                    )
+                    for intermediate in interpolate_result:
                         sink.write(intermediate)
                         stats.frames_written += 1
+                    # Carry feature state forward for overlapping pair reuse.
+                    previous_feature_state = feature_state
 
                 sink.write(frame)
                 stats.frames_written += 1

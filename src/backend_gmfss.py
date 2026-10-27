@@ -155,16 +155,17 @@ class GmfssBackend:
         frame_a: np.ndarray,
         frame_b: np.ndarray,
         timesteps: Sequence[float],
-    ) -> list[np.ndarray]:
-        """Return the interpolated frames between two RGB24 frames.
+        previous_feature_state: dict | None = None,
+    ) -> tuple[list[np.ndarray], dict]:
+        """Return the interpolated frames and feature state for reuse.
 
-        Args:
-            frame_a: uint8 (height, width, 3) frame at t=0.
-            frame_b: uint8 (height, width, 3) frame at t=1.
-            timesteps: fractions in (0, 1), typically k / factor.
+        When `previous_feature_state` is provided (from the previous pair's
+        second frame), the overlapping `feat_ext(img0)` is skipped, reducing
+        one feature-extraction pass per pair.
 
-        Returns:
-            One uint8 frame per timestep, in the same order.
+        Returns `(interpolated_frames, state)` where `state` holds the feature
+        tensors of `frame_b` (`feat11`, `feat12`, `feat13`) for reuse as the
+        next overlapping pair's first frame.
         """
         torch = self.torch
         height, width = frame_a.shape[:2]
@@ -191,7 +192,15 @@ class GmfssBackend:
                     for timestep in timesteps
                 ]
 
-        return outputs
+        # Collect feature state from the reuse output for overlap reuse.
+        # The reuse() method returns (flow01, flow10, metric0, metric1, feat11, feat12, feat13, feat21, feat22, feat23).
+        # Return feature state of img1 (second frame) for reuse by the next overlapping pair.
+        feature_state = {
+            "feat11": state[4] if len(state) > 4 else None,
+            "feat12": state[5] if len(state) > 5 else None,
+            "feat13": state[6] if len(state) > 6 else None,
+        }
+        return outputs, feature_state
 
     def _to_tensor(self, frame: np.ndarray) -> object:
         """Convert an RGB24 numpy frame to a normalised NCHW float tensor."""
