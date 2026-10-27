@@ -1,0 +1,10 @@
+# torch is installed by setup.bat from the CUDA wheel index, because the default
+# PyPI wheel is the CPU build:
+#   .venv\Scripts\python.exe -m pip install torch --index-url https://download.pytorch.org/whl/cu126
+
+numpy
+
+# The [ctk] extra is required, not optional: cupy compiles the softsplat kernels
+# at runtime with NVRTC, which needs the CUDA headers and libraries.
+# Without it the first inference fails with "Failed to find CUDA headers".
+cupy-cuda12x[ctk]

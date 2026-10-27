@@ -1,0 +1,365 @@
+# GMFSS-Interp
+
+Frame interpolation for anime, built around **GMFSS Fortuna** - the model that
+currently produces the fewest artefacts on animation. Files are dropped onto a
+batch file; everything is configured in one TOML file beside it.
+
+Designed for the case this project was built for: a 23.976 fps Blu-ray episode
+with hard action cuts, interpolated to 119.88 fps, with the original soft
+subtitles, fonts and chapter markers carried through untouched.
+
+---
+
+## Why GMFSS and not RIFE
+
+RIFE is a general-purpose interpolator. On live action it is excellent and very
+fast. On animation it has two recurring failures:
+
+* **Line wobble** - straight drawn lines bend and ripple between frames.
+* **Warpping on flat colour** - large areas of single colour "boil" because the
+  model has no texture to lock onto.
+
+GMFSS (Generalized Multi-frame Frame Synthesis) was trained with an explicit
+optical-flow/metric stage aimed at animation and a feature-fusion stage that
+reconstructs line art instead of smearing it. It is substantially slower than
+RIFE, and it is the right trade for this content.
+
+> RIFE 4.25 and newer remain available inside Flowframes/Waifu2x-Extension-GUI
+> if speed matters more than quality.
+
+---
+
+## Requirements
+
+| Item | Detail |
+| --- | --- |
+| OS | Windows 10/11, 64-bit |
+| GPU | NVIDIA (CUDA). 8 GB VRAM is enough for 1080p |
+| Disk | ~4 GB for PyTorch and the CUDA headers, ~50 MB for weights, plus room for output |
+| ffmpeg | Installed automatically by `setup.bat`, or `ffmpeg` + `ffprobe` on `PATH` |
+| mkvmerge | Optional. A portable MKVToolNix folder in `tools/mkv/` gives the most faithful copy of fonts and chapters; without it the pipeline muxes with ffmpeg |
+
+Python is handled by `setup.bat`; you do not need a system Python.
+
+---
+
+## Install
+
+Double-click **`setup.bat`** once. It will:
+
+1. Fetch a static ffmpeg build into `tools/` if none is on `PATH`.
+2. Create a Python 3.12 virtual environment in `.venv`.
+3. Install PyTorch with the CUDA 12.6 runtime (~2.4 GB download).
+4. Install `numpy` and `cupy-cuda12x[ctk]` (~1.5 GB, includes the CUDA headers
+   that cupy needs to compile its kernels).
+5. Download the GMFSS checkpoints into `models/`.
+6. Verify that torch and cupy can both see the GPU.
+
+If a step fails the script stops and says which one. Re-running it is safe:
+existing environments, packages and weights are reused.
+
+**Optional: mkvmerge.** Download the portable MKVToolNix zip from
+<https://mkvtoolnix.download/downloads.html>, extract it to `tools/mkv/`, and
+leave `[mux] muxer = "auto"`. The pipeline then uses `tools/mkv/mkvmerge.exe`
+for the final mux, which copies fonts, chapters and track metadata verbatim.
+Without it, ffmpeg does the mux; output is still correct, but chapters land a
+few milliseconds off and attachment handling is less predictable.
+
+---
+
+## Use
+
+1. Open **`config.toml`** and set the frame rate, dedup mode and encoder.
+   This is the only file you normally touch.
+2. Drag one or more video files onto **`Interpolate.bat`**.
+
+A console window shows the resolved plan, a progress line every five seconds,
+and a summary at the end. The progress line carries both the countdown and the
+clock time the run should finish, so a long render can be planned around:
+
+```
+progress:  36.3%  pairs 33/91    3.2 pair/s  ETA   0.3 min  finish ~01:37
+```
+
+The output is written next to the source:
+
+```
+episode01.mkv  ->  episode01_gmfss_5x.mkv
+```
+
+Press `Ctrl+C` to abort; the partial file is deleted.
+
+### Command line (optional)
+
+```bat
+.venv\Scripts\python.exe -m src.main --config config.toml "D:\video\ep01.mkv"
+.venv\Scripts\python.exe -m src.main --config config.toml --dry-run "D:\video\ep01.mkv"
+```
+
+`--dry-run` prints the plan - rate, tracks, model, output path - without
+touching the GPU.
+
+---
+
+## Configuration
+
+All keys live in `config.toml`. Values are validated before any GPU work
+starts; an invalid key produces a message naming that key.
+
+### `[rate]` - how many frames to synthesise
+
+| Key | Meaning |
+| --- | --- |
+| `mode` | `"factor"` multiplies the source rate. `"fps"` targets an absolute rate. |
+| `factor` | Multiplier for `mode = "factor"`. 2-16. |
+| `target_fps` | Target for `mode = "fps"`. Must land on a whole multiple of the source rate within 2%, otherwise the run is rejected rather than silently drifting. |
+
+Examples:
+
+```toml
+# 23.976 -> 119.88 fps
+mode = "factor"
+factor = 5
+```
+
+```toml
+# same result, expressed as a target
+mode = "fps"
+target_fps = 119.88
+```
+
+### `[model]` - which network
+
+| Key | Meaning |
+| --- | --- |
+| `precision` | `"fp32"` (safe, default) or `"fp16"` (autocast; about 35% faster at 1080p, slightly lower VRAM). |
+| `gpu_index` | Which GPU to use when more than one is present. |
+
+### `[dedup]` - do not waste time on repeated frames
+
+Anime is drawn on twos or threes, so a large share of consecutive frames are
+identical. Interpolating them produces nothing.
+
+| Key | Meaning |
+| --- | --- |
+| `mode` | `"exact"` (default; byte-identical decoded frames), `"off"`, or `"diff"` (near-identical, tolerates re-encode noise). |
+| `changed_luma` | `"diff"` only. Per-block luma change that counts as a real change. |
+| `max_changed_ratio` | `"diff"` only. Fraction of the 64x64 block map allowed to change and still count as a duplicate. |
+
+`"exact"` is the default because it is both safe and effective: the same source
+frame always decodes to the same bytes, so twos and threes are caught with no
+risk of hiding real motion. `"diff"` is opt-in; a coarse block comparison can
+also swallow a small movement such as a blink, which then freezes on screen.
+
+### `[scene]` - hard cuts
+
+| Key | Meaning |
+| --- | --- |
+| `enabled` | Detect cuts and hold the frame instead of blending across them. |
+| `threshold` | Mean absolute luma change, 0-1. Lower is more sensitive; `0.25`-`0.35` suits most anime. |
+
+Without this, every cut in an action scene gets a ghost frame - the single most
+visible artefact in interpolated anime.
+
+### `[encode]` - output
+
+| Key | Meaning |
+| --- | --- |
+| `encoder` | Any ffmpeg encoder. `hevc_nvenc` / `h264_nvenc` (hardware), `libx265` / `libx264` (software). |
+| `quality` | CRF for software encoders, constant-quality value for NVENC. Lower is better; 16-20 is transparent for most sources. |
+| `pixel_format` | `yuv420p10le` for 10-bit sources, `yuv420p` for 8-bit. |
+| `container` | `mkv` (keeps ASS subtitles and attachments) or `mp4`. |
+
+### `[mux]` - how the output is assembled
+
+| Key | Meaning |
+| --- | --- |
+| `muxer` | `auto` uses mkvmerge when it is installed and ffmpeg otherwise. `ffmpeg` forces a single pass. `mkvmerge` requires the tool and `container = "mkv"`. |
+| `preserve_audio` | Copy all audio tracks without re-encoding. |
+| `preserve_subtitles` | Copy subtitle tracks, including ASS styling. |
+| `preserve_attachments` | Copy fonts referenced by ASS subtitles. |
+| `preserve_chapters` | Copy chapter markers. |
+
+Interpolation changes the frame count, not the duration, so all timestamps in
+the copied tracks remain valid without retiming.
+
+mkvmerge is preferred because font attachments are the weakest part of ffmpeg's
+Matroska muxing: a missing font does not fail the render, the signs just render
+in the wrong typeface. With `muxer = "auto"` ffmpeg writes the video stream to a
+temporary file and mkvmerge joins it with every remaining element of the source,
+so subtitles, fonts, chapters and track names are copied rather than rebuilt.
+
+### `[paths]`
+
+| Key | Meaning |
+| --- | --- |
+| `ffmpeg` | `"auto"` searches `PATH`; otherwise a full path to `ffmpeg.exe`. `ffprobe` is looked for beside it. |
+| `mkvmerge` | `"auto"` looks in `tools/mkv/`, then `tools/`, then `PATH`. Set a full path to override. |
+| `cache_dir` | Where decoder/encoder/mux logs are written. Relative to the project folder. |
+
+---
+
+## How it works
+
+```
+source.mkv
+   |
+   +-- ffprobe ---> rate, geometry, which tracks exist
+   |
+   +-- ffmpeg (decode, forced CFR) --> RGB24 frames on a pipe
+                                        |
+                          duplicate / scene-cut check
+                                        |
+                            GMFSS Fortuna (one feature pass
+                            per pair, one fusion pass per
+                            synthesised frame)
+                                        |
+   +-- ffmpeg (encode) <----------------+
+   |
+   +-- mkvmerge: encoded video + every track, font and chapter of the source
+   |
+output.mkv
+```
+
+Nothing is written to disk except the final file: a 24 minute 1080p episode is
+about 34,000 frames, which as PNG would be tens of gigabytes.
+
+---
+
+## Performance
+
+Measured on an RTX 3060 12 GB, GMFSS Fortuna, 4 intermediates per pair
+(5x multiply), random frames:
+
+| Resolution | fp32 | fp16 | Output frames/s (fp32) |
+| --- | --- | --- | --- |
+| 640x360 | 0.34 s/pair | - | 11.9 |
+| 1280x720 | 1.36 s/pair | - | 2.9 |
+| 1920x1080 | 3.13 s/pair | 2.02 s/pair | 1.3 |
+
+A 24 minute 1080p episode at 23.976 fps is about 34,000 pairs. At 3.1 s/pair
+that is roughly **29 hours** of pure inference before dedup and before encoding;
+`precision = "fp16"` and exact-frame dedup are what make this practical. Expect
+a full episode to run overnight, not in an hour.
+
+Practical notes:
+
+* Dedup is the single biggest saving on TV anime - many shows repeat 30-50% of
+  frames, and those pairs cost nothing.
+* `precision = "fp16"` measured ~35% faster at 1080p with no visible difference
+  on the test material; try a short clip both ways before committing a series.
+* If a run dies with a CUDA out-of-memory error, set `precision = "fp16"` first.
+* Scene detection costs almost nothing and removes the worst artefacts; keep it on.
+
+---
+
+## Troubleshooting
+
+**`ffmpeg was not found on PATH`**
+`setup.bat` normally installs one into `tools/`. If that download failed,
+install ffmpeg manually (ffmpeg + ffprobe), add its `bin` folder to `PATH`, or
+set `[paths] ffmpeg` to the full path of `ffmpeg.exe`.
+
+**`Failed to find CUDA headers`**
+cupy compiles its kernels with NVRTC and needs the CUDA headers, which are not
+part of the driver:
+
+```bat
+.venv\Scripts\python.exe -m pip install "cupy-cuda12x[ctk]"
+```
+
+**`The cupy softsplat backend failed to initialise`**
+Either the driver is too old for the installed CUDA runtime, or the CUDA headers
+are missing. Install them:
+
+```bat
+.venv\Scripts\python.exe -m pip install "cupy-cuda12x[ctk]"
+```
+
+There is no second softsplat backend in this project: the taichi variant used by
+the upstream ComfyUI package drives every call through a worker process and
+deadlocks when used from a plain script.
+
+**`CUDA is not available to torch`**
+The installed torch is the CPU build. Reinstall it from the CUDA index:
+
+```bat
+.venv\Scripts\python.exe -m pip install --force-reinstall torch --index-url https://download.pytorch.org/whl/cu126
+```
+
+**`is not a whole multiple of the source rate`**
+You used `mode = "fps"`. Either set `mode = "factor"` or use a target that is a
+whole multiple (119.88 for 23.976).
+
+**`mkvmerge exited with code 2`**
+mkvmerge could not assemble the output; `cache/mux.log` holds the reason. If the
+message names an attachment or chapter file, the source is unusual - set
+`muxer = "ffmpeg"` to bypass mkvmerge for that file.
+
+**`mux.muxer = "mkvmerge" but mkvmerge was not found`**
+Either drop a portable MKVToolNix folder into `tools/mkv/`, add `mkvmerge.exe`
+to `PATH`, set `[paths] mkvmerge`, or use the default `muxer = "auto"`.
+
+**Output has ghost frames at cuts**
+Lower `[scene] threshold` (try `0.20`). If the show has very soft dissolves
+that are being mistaken for cuts, raise it instead.
+
+**Output looks soft / lines shimmer**
+Set `[dedup] mode = "off"` and compare a short clip. If the shimmer disappears,
+dedup was skipping real motion; keep the safer `"exact"` mode.
+
+---
+
+## Project layout
+
+```
+GMFSS-Interp/
+  Interpolate.bat        drag-and-drop launcher
+  setup.bat              one-time installer
+  config.toml            all settings
+  requirements.txt       dependency notes (torch installed separately)
+  src/
+    main.py              CLI and error reporting
+    config.py            TOML loading and validation
+    probe.py             ffprobe wrapper
+    ffmpeg.py            tool resolution, command construction
+    mux.py               final mux with mkvmerge
+    dedup.py             duplicate and scene-cut detection
+    backend_gmfss.py     model loading and inference
+    pipeline.py          streaming decode -> interpolate -> encode
+    download_models.py   checkpoint downloader
+  vendor/                GMFSS architecture + softsplat operators (MIT)
+  models/                checkpoints (downloaded)
+  tools/                 ffmpeg + ffprobe (bundled by setup.bat), optional mkv/
+  cache/                 decoder, encoder and mux logs
+```
+
+`vendor/` contains a pinned copy of the GMFSS architecture and the softsplat
+operators from
+[ComfyUI-Frame-Interpolation](https://github.com/Fannovel16/ComfyUI-Frame-Interpolation)
+(MIT, Copyright (c) 2023 Fannovel16), with a small standalone shim replacing the
+ComfyUI device helpers. It is vendored rather than installed so a ComfyUI update
+cannot silently change model behaviour.
+
+Local changes to the vendored copy, all cosmetic or packaging:
+
+* `comfy/model_management.py` is a three-function stand-in for the ComfyUI
+  device helpers.
+* `vfi_models/ops/__init__.py` exposes only `softsplat` and `init` instead of
+  re-exporting every operator the upstream package supports.
+* Three regexes in `cupy_ops/utils.py` use raw strings, which silences Python
+  3.12 `SyntaxWarning`s without changing what they match.
+* `taichi_ops/` is removed. The taichi backend drives each call through a worker
+  process and deadlocks when used from a plain script.
+
+## Credits and licences
+
+* GMFSS Fortuna architecture and weights:
+  [98mxr/GMFSS_Fortuna](https://github.com/98mxr/GMFSS_Fortuna).
+* Packaging and operator implementations:
+  [ComfyUI-Frame-Interpolation](https://github.com/Fannovel16/ComfyUI-Frame-Interpolation) (MIT).
+* Checkpoint mirror: the public
+  [VSGAN-tensorrt-docker model release](https://github.com/styler00dollar/VSGAN-tensorrt-docker/releases).
+
+The model weights are distributed by their authors for research and personal
+use. Check their terms before using this pipeline for anything commercial.

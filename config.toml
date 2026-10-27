@@ -1,0 +1,107 @@
+# ============================================================================
+#  GMFSS-Interp - settings
+#
+#  Edit this file once, save it, then just drag video files onto
+#  Interpolate.bat. No command line flags needed.
+#
+#  Values are validated on every run. If something is wrong you get a message
+#  naming the exact key instead of a stack trace.
+# ============================================================================
+
+[rate]
+# How the output frame rate is decided. Pick ONE of the two modes.
+#   "factor" -> multiply the source rate (23.976 x 5 = 119.88)
+#   "fps"    -> aim for an absolute rate (120). The implied factor must land
+#               on a whole number within 2%, otherwise the run is rejected.
+mode = "factor"
+factor = 3
+target_fps = 120.0
+
+
+[model]
+# "fp32" is the safe option: the softsplat CUDA kernels are float32 only.
+# "fp16" runs the network in half precision via autocast. About 35% faster at
+# 1080p and a little lighter on VRAM; the splatting stage itself is still fp32.
+precision = "fp16"
+
+# Which GPU to use when more than one is present (0 = first).
+gpu_index = 0
+
+
+[dedup]
+# Anime is drawn on twos and threes, so many consecutive frames are identical.
+# Interpolating between identical frames wastes time and adds nothing.
+#   "off"   - interpolate every pair.
+#   "exact" - skip pairs whose decoded frames are byte identical. Recommended:
+#             the same source frame always decodes to the same bytes.
+#   "diff"  - skip pairs where almost no block changed (tolerates re-encode
+#             noise). Opt-in only: with a coarse block map it can also hide a
+#             small motion such as a blink, which then freezes on screen.
+mode = "exact"
+
+# "diff" only. A block counts as changed when its mean luma moved by more than
+# this many levels (0-64).
+changed_luma = 6.0
+
+# "diff" only. Fraction of the 64x64 block map that may change for a pair to
+# still count as a duplicate. 0.0005 = 0.05% of blocks.
+max_changed_ratio = 0.0005
+
+
+[scene]
+# Hard cuts. Without this, GMFSS blends across the cut and you get a ghost
+# frame at every transition - the most visible artefact in action-heavy shows.
+enabled = true
+
+# Mean absolute luma difference between the two frames, 0..1.
+# Lower = more sensitive. 0.25-0.35 suits most anime.
+threshold = 0.30
+
+
+[encode]
+# Any ffmpeg encoder name. Tested values:
+#   hevc_nvenc, h264_nvenc   - NVIDIA hardware, fastest
+#   libx265, libx264         - software, smaller files
+encoder = "hevc_nvenc"
+
+# CRF for software encoders, constant quality for NVENC. Lower = better.
+quality = 18
+
+# yuv420p for 8-bit sources, yuv420p10le for 10-bit sources.
+pixel_format = "yuv420p10le"
+
+container = "mkv"
+
+
+[mux]
+# Which tool writes the final file.
+#   "auto"     - mkvmerge if it is installed, otherwise ffmpeg. Recommended.
+#   "ffmpeg"   - one pass: ffmpeg encodes the video and copies the tracks at
+#                the same time.
+#   "mkvmerge" - ffmpeg writes video only, then mkvmerge joins it with the
+#                source tracks. Fails if mkvmerge is missing.
+# mkvmerge is preferred because it carries font attachments more reliably,
+# and fonts are what make ASS signs render as the author intended.
+# Requires container = "mkv".
+muxer = "auto"
+
+# Carried straight through from the source file. Interpolation changes frame
+# count, not duration, so timestamps stay valid and nothing needs retiming.
+preserve_subtitles = true
+preserve_chapters = true
+preserve_attachments = true  # fonts referenced by ASS subtitles
+preserve_audio = true
+
+
+[paths]
+# "auto" searches PATH, then tools/ next to this file. Set an explicit path if
+# auto-detection fails.
+# Example: ffmpeg = "C:/tools/ffmpeg/bin/ffmpeg.exe"
+ffmpeg = "auto"
+
+# Optional. "auto" looks for mkvmerge.exe in tools/mkv, then tools/, then PATH.
+mkvmerge = "auto"
+
+# Where the decoder, encoder and mux logs are written. Frames are streamed
+# through pipes and never touch the disk, so this only holds text.
+cache_dir = "cache"
