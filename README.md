@@ -132,8 +132,10 @@ target_fps = 119.88
 
 | Key | Meaning |
 | --- | --- |
-| `precision` | `"fp32"` (safe, default) or `"fp16"` (autocast; about 35% faster at 1080p, slightly lower VRAM). |
+| `precision` | `"fp32"` (safe, default) or `"fp16"` (autocast; about 45% faster at 1080p, slightly lower VRAM). |
 | `gpu_index` | Which GPU to use when more than one is present. |
+| `attention` | `"sdpa"` (default) uses PyTorch's fused attention inside GMFlow; `"reference"` runs the original matmul/softmax code. Same result up to rounding, ~9% slower. |
+| `fusion_layout` | `"channels_last"` (default) runs the fusion network on cudnn's NHWC path, ~3% faster at 1080p; `"nchw"` keeps the original layout. The two differ by at most one 8-bit level. |
 
 ### `[dedup]` - do not waste time on repeated frames
 
@@ -228,28 +230,50 @@ about 34,000 frames, which as PNG would be tens of gigabytes.
 
 ## Performance
 
-Measured on an RTX 3060 12 GB, GMFSS Fortuna, 4 intermediates per pair
-(5x multiply), random frames:
+Measured on this machine: RTX 3060 8 GB, i5-12400F, Windows 11, torch 2.14
+(CUDA 12.6), idle desktop, best of four runs. 1080p is real content from the
+sample episode; the smaller resolutions are the same frames decimated, since
+inference cost tracks pixel count rather than content.
 
-| Resolution | fp32 | fp16 | Output frames/s (fp32) |
-| --- | --- | --- | --- |
-| 640x360 | 0.34 s/pair | - | 11.9 |
-| 1280x720 | 1.36 s/pair | - | 2.9 |
-| 1920x1080 | 3.13 s/pair | 2.02 s/pair | 1.3 |
+| Resolution | Intermediates | Precision | s/pair | Output frames/s |
+| --- | --- | --- | --- | --- |
+| 1920x1080 | 4 (5x) | fp16 | 1.3 | 3.8 |
+| 1920x1080 | 4 (5x) | fp32 | 2.4 | 2.1 |
+| 1920x1080 | 2 (3x) | fp16 | 1.0 | 2.7 |
+| 1280x720 | 4 (5x) | fp16 | 0.6 | 8.5 |
+| 640x360 | 4 (5x) | fp16 | 0.16 | 32 |
 
-A 24 minute 1080p episode at 23.976 fps is about 34,000 pairs. At 3.1 s/pair
-that is roughly **29 hours** of pure inference before dedup and before encoding;
-`precision = "fp16"` and exact-frame dedup are what make this practical. Expect
-a full episode to run overnight, not in an hour.
+A 24 minute 1080p episode at 23.976 fps is about 34,000 pairs. At 1.3 s/pair
+that is roughly **12 hours** of pure inference at 5x before dedup and before
+encoding; `precision = "fp16"` and exact-frame dedup are what make this
+practical. Expect a full episode to run overnight, not in an hour.
+
+Where the time goes at 1080p fp16, per pair with 4 intermediates:
+
+| Stage | ms/pair | Share |
+| --- | --- | --- |
+| GMFlow, two directions | 523 | 47% |
+| Fusion network (GridNet), 4 passes | 445 | 40% |
+| Splatting (10 softsplat calls) | 85 | 8% |
+| feature + metric extraction | 52 | 5% |
+
+The GPU is the limit, not the Python loop: host-side enqueueing costs about
+0.8 s/pair, well under the 1.3 s the GPU takes, and running several pairs
+concurrently does not change throughput. That is why this project optimises
+kernels and layouts rather than rewriting the driver in another language.
 
 Practical notes:
 
 * Dedup is the single biggest saving on TV anime - many shows repeat 30-50% of
   frames, and those pairs cost nothing.
-* `precision = "fp16"` measured ~35% faster at 1080p with no visible difference
+* `precision = "fp16"` measured ~45% faster at 1080p with no visible difference
   on the test material; try a short clip both ways before committing a series.
-* If a run dies with a CUDA out-of-memory error, set `precision = "fp16"` first.
+* If a run dies with a CUDA out-of-memory error, set `precision = "fp16"` first,
+  then close other GPU applications. 8 GB is the practical floor at 1080p.
 * Scene detection costs almost nothing and removes the worst artefacts; keep it on.
+* Optional headroom on 8 GB cards: GMFlow can predict both flow directions in a
+  single pass, which is another ~5% (measured), but it needs a 4.3 GB temporary
+  correlation matrix and does not fit alongside everything else. It stays off.
 
 ---
 
@@ -328,6 +352,7 @@ GMFSS-Interp/
     backend_gmfss.py     model loading and inference
     pipeline.py          streaming decode -> interpolate -> encode
     download_models.py   checkpoint downloader
+  tests/                 unit tests (no GPU needed)
   vendor/                GMFSS architecture + softsplat operators (MIT)
   models/                checkpoints (downloaded)
   tools/                 ffmpeg + ffprobe (bundled by setup.bat), optional mkv/
@@ -341,7 +366,8 @@ operators from
 ComfyUI device helpers. It is vendored rather than installed so a ComfyUI update
 cannot silently change model behaviour.
 
-Local changes to the vendored copy, all cosmetic or packaging:
+Local changes to the vendored copy. The first four are cosmetic or packaging,
+the last two are performance changes with a matching switch in `[model]`:
 
 * `comfy/model_management.py` is a three-function stand-in for the ComfyUI
   device helpers.
@@ -351,6 +377,15 @@ Local changes to the vendored copy, all cosmetic or packaging:
   3.12 `SyntaxWarning`s without changing what they match.
 * `taichi_ops/` is removed. The taichi backend drives each call through a worker
   process and deadlocks when used from a plain script.
+* `single_head_split_window_attention` can dispatch to
+  `torch.nn.functional.scaled_dot_product_attention` instead of the hand-written
+  matmul/softmax/matmul, selected by `[model] attention`. It reuses the same
+  window split/merge and the same additive mask; the savings come from the
+  fused kernel not materialising every window's full score matrix.
+* `Model.device` converts the GridNet weights to `channels_last` when
+  `[model] fusion_layout` asks for it, and `Model.inference` passes NHWC inputs
+  to match. The splat operators stay NCHW because their CUDA kernels are, so the
+  layout changes only at the fusion boundary.
 
 ## Credits and licences
 

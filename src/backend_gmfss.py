@@ -104,9 +104,18 @@ class GmfssBackend:
             ) from error
 
         try:
+            import GMFSS_Fortuna_arch as arch_module
             from GMFSS_Fortuna_arch import Model as ModelClass
         except ImportError as error:
             raise BackendError(f"Could not import the GMFSS architecture: {error}") from error
+
+        # Select the transformer attention kernel and the GridNet layout before
+        # any forward pass. The vendored module reads these flags at call time,
+        # and sys.modules caching means a reload would otherwise keep a previous
+        # setting. fusion_layout must be set before Model.device() runs, because
+        # that is where the GridNet weights are converted.
+        arch_module.ATTENTION_IMPL = model_config.attention
+        arch_module.CHANNELS_LAST_FUSION = model_config.fusion_layout == "channels_last"
 
         weights = root / "models"
         paths = {}

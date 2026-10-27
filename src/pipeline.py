@@ -200,7 +200,11 @@ class _FrameSink:
     def write(self, frame: np.ndarray) -> None:
         if self._stream is None:
             raise PipelineError("Encoder input is closed")
-        self._stream.write(frame.tobytes())
+        # Hand the buffer over directly instead of frame.tobytes(): the pipe
+        # write copies into its own buffer anyway, so tobytes() only added a
+        # second 6 MB copy per frame. cast("B") flattens the shape and asserts
+        # C-contiguity, which every frame this sink receives satisfies.
+        self._stream.write(memoryview(frame).cast("B"))
 
     def close(self) -> None:
         if self._stream is not None:

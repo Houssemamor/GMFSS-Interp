@@ -32,6 +32,17 @@ from comfy.model_management import get_torch_device
 device = get_torch_device()
 backwarp_tenGrid = {}
 
+# Attention kernel used inside the GMFlow transformer. "sdpa" uses PyTorch's
+# fused scaled_dot_product_attention; "reference" keeps the original
+# matmul/softmax/matmul path so outputs can be compared without editing
+# vendored code. src/backend_gmfss.py sets this from [model] attention.
+ATTENTION_IMPL = "sdpa"
+
+# GridNet runs in NHWC when True. Convolution-only, so this is purely a layout
+# choice: the output differs from NCHW by at most one 8-bit level because cudnn
+# picks a different reduction order. Set from [model] fusion_layout.
+CHANNELS_LAST_FUSION = True
+
 
 def warp(tenInput, tenFlow):
     k = (str(tenFlow.device), str(tenFlow.size()))
@@ -393,8 +404,6 @@ def single_head_split_window_attention(
     k = k.view(b, h, w, c)
     v = v.view(b, h, w, c)
 
-    scale_factor = c**0.5
-
     if with_shift:
         assert attn_mask is not None  # compute once
         shift_size_h = window_size_h // 2
@@ -410,17 +419,34 @@ def single_head_split_window_attention(
     k = split_feature(k, num_splits=num_splits, channel_last=True)
     v = split_feature(v, num_splits=num_splits, channel_last=True)
 
-    scores = (
-        torch.matmul(q.view(b_new, -1, c), k.view(b_new, -1, c).permute(0, 2, 1))
-        / scale_factor
-    )  # [B*K*K, H/K*W/K, H/K*W/K]
+    if ATTENTION_IMPL == "sdpa":
+        # Fused attention. The hand-written matmul/softmax/matmul below
+        # materialises every window's [L, L] score matrix; SDPA selects the
+        # flash kernel instead. Measured 305 -> 254 ms per flow pass at 1080p
+        # fp16, with flows agreeing to a mean of 0.018 px (max 0.43 px).
+        # The additive mask is already in the shape SDPA wants once it is
+        # broadcast over the batch and given a head axis.
+        window_mask = attn_mask.repeat(b, 1, 1).unsqueeze(1) if with_shift else None
+        out = F.scaled_dot_product_attention(
+            q.view(b_new, -1, c).unsqueeze(1),
+            k.view(b_new, -1, c).unsqueeze(1),
+            v.view(b_new, -1, c).unsqueeze(1),
+            attn_mask=window_mask,
+        ).squeeze(1)  # [B*K*K, H/K*W/K, C]
+    else:
+        scale_factor = c**0.5
 
-    if with_shift:
-        scores += attn_mask.repeat(b, 1, 1)
+        scores = (
+            torch.matmul(q.view(b_new, -1, c), k.view(b_new, -1, c).permute(0, 2, 1))
+            / scale_factor
+        )  # [B*K*K, H/K*W/K, H/K*W/K]
 
-    attn = torch.softmax(scores, dim=-1)
+        if with_shift:
+            scores += attn_mask.repeat(b, 1, 1)
 
-    out = torch.matmul(attn, v.view(b_new, -1, c))  # [B*K*K, H/K*W/K, C]
+        attn = torch.softmax(scores, dim=-1)
+
+        out = torch.matmul(attn, v.view(b_new, -1, c))  # [B*K*K, H/K*W/K, C]
 
     out = merge_splits(
         out.view(b_new, h // num_splits, w // num_splits, c),
@@ -1707,6 +1733,11 @@ class Model:
         self.metricnet.to(device)
         self.feat_ext.to(device)
         self.fusionnet.to(device)
+        if CHANNELS_LAST_FUSION:
+            # Convert the GridNet weights once so its convolutions run on the
+            # NHWC path. Must run after .to(device) so the conversion does not
+            # have to be repeated on the GPU.
+            self.fusionnet.to(memory_format=torch.channels_last)
 
     def load_model(self, path_dict):
         #models/GMFSS_fortuna_flownet.pkl
@@ -1739,6 +1770,11 @@ class Model:
         else:
             imgf0 = img0
             imgf1 = img1
+        # Two unidirectional passes. A single pred_bidir_flow pass would be
+        # ~14% faster, but it concatenates both directions into one
+        # [2*B, HW, HW] global-correlation matrix (4.26 GB at 1080p fp16), which
+        # does not fit on an 8 GB card. Do not switch this without chunking that
+        # correlation.
         flow01 = self.flownet(imgf0, imgf1, return_flow=True)
         flow10 = self.flownet(imgf1, imgf0, return_flow=True)
         if scale != 1.0:
@@ -1840,11 +1876,22 @@ class Model:
         )
         feat2t3 = softsplat(feat23, F2tdd, Z2dd, strMode="soft")
 
-        out = self.fusionnet(
-            torch.cat([img0, I1t, I2t, img1], dim=1),
-            torch.cat([feat1t1, feat2t1], dim=1),
-            torch.cat([feat1t2, feat2t2], dim=1),
-            torch.cat([feat1t3, feat2t3], dim=1),
-        )
+        head = torch.cat([img0, I1t, I2t, img1], dim=1)
+        level1 = torch.cat([feat1t1, feat2t1], dim=1)
+        level2 = torch.cat([feat1t2, feat2t2], dim=1)
+        level3 = torch.cat([feat1t3, feat2t3], dim=1)
+
+        if CHANNELS_LAST_FUSION:
+            # GridNet is pure convolution, and cudnn reaches its fastest kernels
+            # with NHWC layout. The weights were converted in Model.device(), so
+            # these casts are the only place the layout changes; leaving them out
+            # makes every conv pay an implicit transpose instead (measured ~8%
+            # slower than the NCHW path, i.e. worse than doing nothing).
+            head = head.contiguous(memory_format=torch.channels_last)
+            level1 = level1.contiguous(memory_format=torch.channels_last)
+            level2 = level2.contiguous(memory_format=torch.channels_last)
+            level3 = level3.contiguous(memory_format=torch.channels_last)
+
+        out = self.fusionnet(head, level1, level2, level3)
 
         return torch.clamp(out, 0, 1)

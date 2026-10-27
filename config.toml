@@ -20,12 +20,25 @@ target_fps = 120.0
 
 [model]
 # "fp32" is the safe option: the softsplat CUDA kernels are float32 only.
-# "fp16" runs the network in half precision via autocast. About 35% faster at
+# "fp16" runs the network in half precision via autocast. About 45% faster at
 # 1080p and a little lighter on VRAM; the splatting stage itself is still fp32.
 precision = "fp16"
 
 # Which GPU to use when more than one is present (0 = first).
 gpu_index = 0
+
+# GMFlow's transformer attention kernel.
+#   "sdpa"      - PyTorch fused scaled_dot_product_attention. Same maths, ~17%
+#                 faster on the flow network. Recommended.
+#   "reference" - the original matmul/softmax/matmul code. Slower; keep it only
+#                 to reproduce results from before the optimisation.
+attention = "sdpa"
+
+# Memory layout for the fusion network (GridNet).
+#   "channels_last" - NHWC, uses the faster cudnn convolution kernels at 1080p.
+#                     Output can differ by at most one 8-bit level from "nchw".
+#   "nchw"          - the original layout.
+fusion_layout = "channels_last"
 
 
 [dedup]

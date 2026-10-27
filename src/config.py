@@ -34,10 +34,22 @@ class RateConfig:
 
 @dataclasses.dataclass(frozen=True)
 class ModelConfig:
-    """Which interpolation network to load and how."""
+    """Which interpolation network to load and how.
+
+    ``attention`` selects the GMFlow transformer kernel: "sdpa" uses PyTorch's
+    fused scaled_dot_product_attention, "reference" keeps the original
+    matmul/softmax/matmul path for output comparison. The two differ only in
+    floating-point rounding, never in shape or meaning.
+
+    ``fusion_layout`` selects the GridNet memory format: "channels_last" runs
+    its convolutions on cudnn's NHWC path, "nchw" keeps the original layout.
+    Also a rounding-only difference.
+    """
 
     precision: str
     gpu_index: int
+    attention: str
+    fusion_layout: str
 
 
 @dataclasses.dataclass(frozen=True)
@@ -220,6 +232,15 @@ def load_config(path: pathlib.Path, root: pathlib.Path | None = None) -> Config:
             _get(model_raw, "model", "precision", "fp32"), "model", "precision", ("fp32", "fp16"),
         ),
         gpu_index=_require_int(_get(model_raw, "model", "gpu_index", 0), "model", "gpu_index", 0, 15),
+        attention=_require_choice(
+            _get(model_raw, "model", "attention", "sdpa"), "model", "attention", ("sdpa", "reference"),
+        ),
+        fusion_layout=_require_choice(
+            _get(model_raw, "model", "fusion_layout", "channels_last"),
+            "model",
+            "fusion_layout",
+            ("channels_last", "nchw"),
+        ),
     )
 
     dedup_raw = _section(data, "dedup")
