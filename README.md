@@ -257,10 +257,13 @@ Where the time goes at 1080p fp16, per pair with 4 intermediates:
 | Splatting (10 softsplat calls) | 85 | 8% |
 | feature + metric extraction | 52 | 5% |
 
-The GPU is the limit, not the Python loop: host-side enqueueing costs about
-0.8 s/pair, well under the 1.3 s the GPU takes, and running several pairs
-concurrently does not change throughput. That is why this project optimises
-kernels and layouts rather than rewriting the driver in another language.
+The GPU is the limit, not the Python loop. Summing the stage times measured with
+CUDA events gives 1.11 s of the 1.11 s wall time per pair at 3x, and about
+1.29 s of the 1.30 s at 5x, so launch overhead is a few percent at most. Each
+timestep ends in a device-to-host copy, which serialises the loop by design, and
+there is no idle gap for CUDA graphs to remove (tried; no gain). That is why
+this project optimises kernels and layouts rather than rewriting the driver in
+another language.
 
 Practical notes:
 
