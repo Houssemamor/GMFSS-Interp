@@ -192,6 +192,106 @@ softsplat_out = """
 """
 
 
+softsplat_weighted_out = """
+    extern "C" __global__ void __launch_bounds__(512) softsplat_weighted_out(
+        const int n,
+        const {{type}}* __restrict__ tenIn,
+        const {{type}}* __restrict__ tenFlow,
+        const {{type}}* __restrict__ tenWeight,
+        {{type}}* __restrict__ tenOut
+    ) { for (int intIndex = (blockIdx.x * blockDim.x) + threadIdx.x; intIndex < n; intIndex += blockDim.x * gridDim.x) {
+        const int intN = ( intIndex / SIZE_3(tenOut) / SIZE_2(tenOut) / SIZE_1(tenOut) ) % SIZE_0(tenOut);
+        const int intC = ( intIndex / SIZE_3(tenOut) / SIZE_2(tenOut)                  ) % SIZE_1(tenOut);
+        const int intY = ( intIndex / SIZE_3(tenOut)                                   ) % SIZE_2(tenOut);
+        const int intX = ( intIndex                                                    ) % SIZE_3(tenOut);
+
+        assert(SIZE_1(tenFlow) == 2);
+
+        {{type}} fltX = ({{type}}) (intX) + VALUE_4(tenFlow, intN, 0, intY, intX);
+        {{type}} fltY = ({{type}}) (intY) + VALUE_4(tenFlow, intN, 1, intY, intX);
+
+        if (isfinite(fltX) == false) { return; }
+        if (isfinite(fltY) == false) { return; }
+
+        const {{type}} fltWeight = VALUE_4(tenWeight, intN, 0, intY, intX);
+
+        {{type}} fltIn = (intC < SIZE_1(tenIn))
+            ? (VALUE_4(tenIn, intN, intC, intY, intX) * fltWeight)
+            : fltWeight;
+
+        int intNorthwestX = (int) (floor(fltX));
+        int intNorthwestY = (int) (floor(fltY));
+        int intNortheastX = intNorthwestX + 1;
+        int intNortheastY = intNorthwestY;
+        int intSouthwestX = intNorthwestX;
+        int intSouthwestY = intNorthwestY + 1;
+        int intSoutheastX = intNorthwestX + 1;
+        int intSoutheastY = intNorthwestY + 1;
+
+        {{type}} fltNorthwest = (({{type}}) (intSoutheastX) - fltX) * (({{type}}) (intSoutheastY) - fltY);
+        {{type}} fltNortheast = (fltX - ({{type}}) (intSouthwestX)) * (({{type}}) (intSouthwestY) - fltY);
+        {{type}} fltSouthwest = (({{type}}) (intNortheastX) - fltX) * (fltY - ({{type}}) (intNortheastY));
+        {{type}} fltSoutheast = (fltX - ({{type}}) (intNorthwestX)) * (fltY - ({{type}}) (intNorthwestY));
+
+        if ((intNorthwestX >= 0) && (intNorthwestX < SIZE_3(tenOut)) && (intNorthwestY >= 0) && (intNorthwestY < SIZE_2(tenOut))) {
+            atomicAdd(&tenOut[OFFSET_4(tenOut, intN, intC, intNorthwestY, intNorthwestX)], fltIn * fltNorthwest);
+        }
+
+        if ((intNortheastX >= 0) && (intNortheastX < SIZE_3(tenOut)) && (intNortheastY >= 0) && (intNortheastY < SIZE_2(tenOut))) {
+            atomicAdd(&tenOut[OFFSET_4(tenOut, intN, intC, intNortheastY, intNortheastX)], fltIn * fltNortheast);
+        }
+
+        if ((intSouthwestX >= 0) && (intSouthwestX < SIZE_3(tenOut)) && (intSouthwestY >= 0) && (intSouthwestY < SIZE_2(tenOut))) {
+            atomicAdd(&tenOut[OFFSET_4(tenOut, intN, intC, intSouthwestY, intSouthwestX)], fltIn * fltSouthwest);
+        }
+
+        if ((intSoutheastX >= 0) && (intSoutheastX < SIZE_3(tenOut)) && (intSoutheastY >= 0) && (intSoutheastY < SIZE_2(tenOut))) {
+            atomicAdd(&tenOut[OFFSET_4(tenOut, intN, intC, intSoutheastY, intSoutheastX)], fltIn * fltSoutheast);
+        }
+    } }
+"""
+
+
+@torch.cuda.amp.custom_fwd(cast_inputs=torch.float32)
+def softsplat_weighted(tenIn, tenFlow, tenWeight):
+    """Scatter tenIn*tenWeight and the weight sum, without building that tensor.
+
+    Same arithmetic as softsplat_func on ``cat([tenIn*tenWeight, tenWeight])``
+    but the multiply happens inside the kernel: the input is read once and the
+    weighted copy plus its extra channel are never materialised. That removes
+    two full passes over the data from every splat call.
+
+    Inference only: the training path keeps the upstream formulation, because
+    the vendored backward kernels are written against the concatenated input.
+    """
+    tenOut = tenIn.new_zeros(
+        [tenIn.shape[0], tenIn.shape[1] + 1, tenIn.shape[2], tenIn.shape[3]]
+    )
+
+    cuda_launch(
+        cuda_kernel(
+            "softsplat_weighted_out",
+            softsplat_weighted_out,
+            {"tenIn": tenIn, "tenFlow": tenFlow, "tenWeight": tenWeight, "tenOut": tenOut},
+        )
+    )(
+        grid=tuple([int((tenOut.nelement() + 512 - 1) / 512), 1, 1]),
+        block=tuple([512, 1, 1]),
+        args=[
+            cuda_int32(tenOut.nelement()),
+            tenIn.data_ptr(),
+            tenFlow.data_ptr(),
+            tenWeight.data_ptr(),
+            tenOut.data_ptr(),
+        ],
+        stream=collections.namedtuple("Stream", "ptr")(
+            torch.cuda.current_stream().cuda_stream
+        ),
+    )
+
+    return tenOut
+
+
 # end
 
 class softsplat_func(torch.autograd.Function):
@@ -383,14 +483,15 @@ def softsplat(
     tenIn: torch.Tensor, tenFlow: torch.Tensor, tenMetric: torch.Tensor, strMode: str
 ):
     assert strMode.split("-")[0] in ["sum", "avg", "linear", "soft"]
+    strModeType = strMode.split("-")[0]
 
     if strMode == "sum":
         assert tenMetric is None
     if strMode == "avg":
         assert tenMetric is None
-    if strMode.split("-")[0] == "linear":
+    if strModeType == "linear":
         assert tenMetric is not None
-    if strMode.split("-")[0] == "soft":
+    if strModeType == "soft":
         assert tenMetric is not None
 
     if strMode == "avg":
@@ -401,18 +502,29 @@ def softsplat(
             ],
             1,
         )
+        tenOut = softsplat_func.apply(tenIn, tenFlow)
 
-    elif strMode.split("-")[0] == "linear":
-        tenIn = torch.cat([tenIn * tenMetric, tenMetric], 1)
+    elif strModeType == "linear" or strModeType == "soft":
+        # In soft mode the metric is exponentiated once. Upstream evaluated
+        # tenMetric.exp() twice, once for the product and once for the
+        # denominator channel; exp is deterministic, so one call is identical.
+        tenWeight = tenMetric.exp() if strModeType == "soft" else tenMetric
 
-    elif strMode.split("-")[0] == "soft":
-        tenIn = torch.cat([tenIn * tenMetric.exp(), tenMetric.exp()], 1)
+        if torch.is_grad_enabled():
+            # Training path: keep the upstream formulation, because the
+            # vendored backward kernels are written against the concatenated
+            # input. This project only ever runs under inference_mode.
+            tenIn = torch.cat([tenIn * tenWeight, tenWeight], 1)
+            tenOut = softsplat_func.apply(tenIn, tenFlow)
+        else:
+            tenOut = softsplat_weighted(tenIn, tenFlow, tenWeight)
+
+    else:
+        tenOut = softsplat_func.apply(tenIn, tenFlow)
 
     # end
 
-    tenOut = softsplat_func.apply(tenIn, tenFlow)
-
-    if strMode.split("-")[0] in ["avg", "linear", "soft"]:
+    if strModeType in ["avg", "linear", "soft"]:
         tenNormalize = tenOut[:, -1:, :, :]
 
         if len(strMode.split("-")) == 1:

@@ -248,14 +248,19 @@ that is roughly **12 hours** of pure inference at 5x before dedup and before
 encoding; `precision = "fp16"` and exact-frame dedup are what make this
 practical. Expect a full episode to run overnight, not in an hour.
 
-Where the time goes at 1080p fp16, per pair with 4 intermediates:
+Where the time goes at 1080p fp16, per pair with 3 timesteps, from one run:
 
 | Stage | ms/pair | Share |
 | --- | --- | --- |
-| GMFlow, two directions | 523 | 47% |
-| Fusion network (GridNet), 4 passes | 445 | 40% |
-| Splatting (10 softsplat calls) | 85 | 8% |
-| feature + metric extraction | 52 | 5% |
+| GMFlow, two directions | 547 | 48% |
+| Fusion network (GridNet), 3 passes | 467 | 41% |
+| Splatting (30 softsplat calls) | 76 | 7% |
+| feature + metric extraction | 55 | 5% |
+
+Per-process totals on this machine drift by a few percent between runs, so the
+table above is one run and the numbers in this section are best-observed. Any
+change worth reporting here was measured as a paired A/B in a single process,
+alternating the two implementations, because that removes the drift.
 
 The GPU is the limit, not the Python loop. Summing the stage times measured with
 CUDA events gives 1.11 s of the 1.11 s wall time per pair at 3x, and about
@@ -370,7 +375,8 @@ ComfyUI device helpers. It is vendored rather than installed so a ComfyUI update
 cannot silently change model behaviour.
 
 Local changes to the vendored copy. The first four are cosmetic or packaging,
-the last two are performance changes with a matching switch in `[model]`:
+the last three are performance changes, two of which have a matching switch in
+`[model]`:
 
 * `comfy/model_management.py` is a three-function stand-in for the ComfyUI
   device helpers.
@@ -389,6 +395,14 @@ the last two are performance changes with a matching switch in `[model]`:
   `[model] fusion_layout` asks for it, and `Model.inference` passes NHWC inputs
   to match. The splat operators stay NCHW because their CUDA kernels are, so the
   layout changes only at the fusion boundary.
+* `cupy_ops/softsplat.py` gains a `softsplat_weighted` kernel, used by
+  `softsplat()` for the weighted modes when grad is off. The upstream code
+  materialises `cat([x*w, w])` so the scatter can read one tensor; the new
+  kernel takes `x`, `w` and the flow separately and multiplies inline, which
+  removes two full passes over the feature maps from every call (~1.3%
+  end-to-end at 1080p, paired A/B). The concatenated formulation is kept for
+  autograd, because the vendored backward kernels are written against it, and
+  `tests/test_softsplat.py` pins the two against each other.
 
 ## Credits and licences
 
