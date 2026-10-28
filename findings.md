@@ -66,6 +66,29 @@
   (oracle + stale-features case; feat0 feeds the splatted features, never the
   flows/metrics).
 
+## Second-round avenues - all three measured (this change)
+
+- SDPA for the global matching (replacing the banded path): patched
+  `global_softmax_average` with `F.scaled_dot_product_attention` and measured
+  the full path: +17.6 ms/pair (+1.35%) - slower. At head dim 256 the fused
+  attention kernels do not cover this shape, so SDPA falls back to an
+  unbanded score materialisation, exactly what the banding avoids. Output
+  drift 54-59 dB against the banded path (different reduction order), moot at
+  that speed. Rejected; banding stays.
+- Fusion batch-3 (one batched fusionnet call instead of three per-timestep
+  calls): stage-level A/B. GridNet itself is batch-safe - a small-tensor
+  check with the real model gives max |diff| 9.8e-4 (fp16 round-off) in both
+  NCHW and NHWC. At real 1080p, though, the timed batch-3 floor is 3631 ms
+  against 436 ms for three sequential calls, peak VRAM 7.82 GiB spills past
+  the 8 GB card into WDDM shared memory (which also poisoned the interleaved
+  rounds and a later arm run in the same process), and the batch-3 cudnn
+  algorithm choice produces saturated garbage (max |diff| 1.0 per channel) -
+  with cudnn.benchmark on, autotune picked an overflowing fp16 algorithm at
+  that shape. Rejected on three independent grounds.
+- cudnn.benchmark: already the production default since the baseline import
+  (31936ac). The clean paired A/B validates the default rather than changing
+  it: on measures -13.35 ms/pair (-1.07%) against off, min 1075 vs 1148 ms.
+
 ## Rejected with numbers
 
 - Hoisting the per-timestep interpolates out of `Model.inference` (the old
