@@ -1847,8 +1847,14 @@ class Model:
         #models/GMFSS_fortuna_fusionnet.pkl
         self.fusionnet.load_state_dict(torch.load(path_dict["fusionnet"]))
 
-    def reuse(self, img0, img1, scale):
-        feat11, feat12, feat13 = self.feat_ext(img0)
+    def reuse(self, img0, img1, scale, feat0=None):
+        # feat0: optional (feat11, feat12, feat13) already extracted from img0,
+        # e.g. the previous pair's second-frame features when the pairs overlap.
+        # Skips one feat_ext pass; the caller guarantees the tensors match img0.
+        if feat0 is None:
+            feat11, feat12, feat13 = self.feat_ext(img0)
+        else:
+            feat11, feat12, feat13 = feat0
         feat21, feat22, feat23 = self.feat_ext(img1)
 
         img0 = F.interpolate(

@@ -45,8 +45,26 @@
   to full extraction.
 - Ceiling measured from the stage split (`feat_ext x2` = 29.3 ms/pair): one
   saved extraction is ~14.6 ms/pair (~1.2%).
+- Measured with a three-frame paired A/B (pair 1 = f0,f1 produces the state;
+  pair 2 = f1,f2 timed with and without the carried state, alternating,
+  warm allocator): -15.75 ms/pair (-1.21%), matching the ceiling. Outputs
+  identical to any two fresh runs (71.9 dB, the splat-atomic noise floor).
+- The pipeline falls back to full extraction on its own whenever the carried
+  state's frame is not the exact object handed to interpolate() - duplicate
+  skips, scene cuts, first pair. `source.read()` returns a fresh
+  `np.frombuffer` array per frame, so identity implies identical pixels; there
+  is no in-place buffer reuse to invalidate the guard.
 - Saving holds ~112 MB of fp16 feature tensors on the GPU between pairs (they
   replace tensors that would be allocated anyway).
+- Extra validation: full clip with every optimisation active vs the pristine
+  pre-optimisation reference render: 50.84 dB avg, 48.26 dB min over 216 frames
+  - the encoder noise floor.
+- Refreshed stage profile (stages.py, default config, one hot run): flownet
+  bidirectional pass 888 ms (57%), fusion 539 (34%), splat 88 (6%), metric 32
+  (2%), one feat_ext 17 (1%). Same-process control median 1517 vs stage sum
+  1568 - instrumentation overhead ~3%. Tests: `tests/test_reuse_feat.py`
+  (oracle + stale-features case; feat0 feeds the splatted features, never the
+  flows/metrics).
 
 ## Rejected with numbers
 

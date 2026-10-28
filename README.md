@@ -249,27 +249,29 @@ that is roughly **12 hours** of pure inference at 5x before dedup and before
 encoding; `precision = "fp16"` and exact-frame dedup are what make this
 practical. Expect a full episode to run overnight, not in an hour.
 
-Where the time goes at 1080p fp16, per pair with 3 timesteps, from one run:
+Where the time goes at 1080p fp16, per pair with 3 timesteps, under the current
+defaults (`flow_pass = "bidir"`, `channels_last`, sdpa attention, the inline
+weight splat kernel, overlap feature reuse):
 
 | Stage | ms/pair | Share |
 | --- | --- | --- |
-| GMFlow, two directions | 547 | 48% |
-| Fusion network (GridNet), 3 passes | 467 | 41% |
-| Splatting (30 softsplat calls) | 76 | 7% |
-| feature + metric extraction | 55 | 5% |
+| GMFlow, one bidirectional pass | 888 | 57% |
+| Fusion network (GridNet), 3 passes + copy | 539 | 34% |
+| Splatting (30 softsplat calls) | 88 | 6% |
+| Extraction: 1 feature pass + both metrics | 49 | 3% |
 
-Per-process totals on this machine drift by a few percent between runs, so the
-table above is one run and the numbers in this section are best-observed. Any
-change worth reporting here was measured as a paired A/B in a single process,
-alternating the two implementations, because that removes the drift.
+Per-process totals on this machine drift by several percent between runs
+(easily 10-15% between a cold and a warm GPU), so the table above is one run
+and the numbers in this section are best-observed. Shares are much more stable
+than totals. Any change worth reporting here was measured as a paired A/B in a
+single process, alternating the two implementations, because that removes the
+drift.
 
-The GPU is the limit, not the Python loop. Summing the stage times measured with
-CUDA events gives 1.11 s of the 1.11 s wall time per pair at 3x, and about
-1.29 s of the 1.30 s at 5x, so launch overhead is a few percent at most. Each
-timestep ends in a device-to-host copy, which serialises the loop by design, and
-there is no idle gap for CUDA graphs to remove (tried; no gain). That is why
-this project optimises kernels and layouts rather than rewriting the driver in
-another language.
+The GPU is the limit, not the Python loop. In the run above the instrumented
+stage sum lands within 3% of the same process's uninstrumented pair median,
+and each timestep ends in a device-to-host copy by design. There is no idle gap
+for CUDA graphs to remove (tried; no gain). That is why this project optimises
+kernels and layouts rather than rewriting the driver in another language.
 
 Practical notes:
 
@@ -285,6 +287,10 @@ Practical notes:
   matrix: doubling the flow batch takes the measured peak from 2.7 to 5.6 GiB
   on a 1080p pair. If a run runs close to the VRAM limit, set
   `flow_pass = "separate"`.
+* Feature reuse is automatic, no config: consecutive pairs overlap by one
+  frame, and the overlapping frame's feature extraction is carried over
+  (~1.2% measured at 1080p). A skipped duplicate pair or a scene cut breaks
+  the chain by itself, and the next pair simply extracts from scratch.
 
 ---
 
@@ -378,7 +384,7 @@ ComfyUI device helpers. It is vendored rather than installed so a ComfyUI update
 cannot silently change model behaviour.
 
 Local changes to the vendored copy. The first four are cosmetic or packaging,
-the rest are performance changes; two of them have a matching switch in
+the rest are performance changes; three of them have a matching switch in
 `[model]`:
 
 * `comfy/model_management.py` is a three-function stand-in for the ComfyUI
@@ -420,6 +426,15 @@ the rest are performance changes; two of them have a matching switch in
   `global_correlation_softmax_chunked`, which stacks the transposed matrix for
   the backward direction; the doubled batch is why the flow stage peaks at
   5.6 GiB instead of 2.7 GiB.
+* `Model.reuse` accepts an optional precomputed `feat0`, and the backend passes
+  the previous pair's second-frame feature tensors there, so the overlapping
+  frame is extracted once per two pairs instead of once per pair (~1.2%
+  measured). The backend reuses the state only when its stored frame is the
+  exact object passed as `frame_a` - identity implies identical pixels because
+  the decoder hands out fresh arrays - so duplicate skips and scene cuts fall
+  back to a full extraction on their own. `tests/test_reuse_feat.py` pins the
+  reused path against a fresh extraction, and the stale-features case against
+  being silently swallowed.
 
 ## Credits and licences
 

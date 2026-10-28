@@ -157,15 +157,23 @@ class GmfssBackend:
         timesteps: Sequence[float],
         previous_feature_state: dict | None = None,
     ) -> tuple[list[np.ndarray], dict]:
-        """Return the interpolated frames and feature state for reuse.
+        """Return the interpolated frames and a feature state for pair reuse.
 
-        When `previous_feature_state` is provided (from the previous pair's
-        second frame), the overlapping `feat_ext(img0)` is skipped, reducing
-        one feature-extraction pass per pair.
+        Consecutive pairs overlap by one frame: pair N ends on frame f+1 and
+        pair N+1 starts on it. `previous_feature_state` carries the second
+        frame's feature tensors from the previous call, so when `frame_a` is
+        that exact frame the overlapping `feat_ext(img0)` pass is skipped
+        (~15 ms/pair at 1080p).
 
-        Returns `(interpolated_frames, state)` where `state` holds the feature
-        tensors of `frame_b` (`feat11`, `feat12`, `feat13`) for reuse as the
-        next overlapping pair's first frame.
+        The state is only reused on object identity (`state["frame"] is
+        frame_a`), not on content: after a skipped duplicate pair or a scene
+        cut the overlap is broken, and identity is what detects that without a
+        6 MB comparison per pair. A mismatched call falls back to full
+        extraction.
+
+        Returns `(interpolated_frames, state)` where `state` holds `frame_b`
+        and its feature tensors (`feat21`, `feat22`, `feat23`) for the next
+        overlapping pair.
         """
         torch = self.torch
         height, width = frame_a.shape[:2]
@@ -184,7 +192,22 @@ class GmfssBackend:
             # the fusion stage. For a 5x multiply that is one reuse + 4 cheap
             # passes instead of 4 full forward passes.
             with torch.autocast("cuda", dtype=torch.float16, enabled=self.precision == "fp16"):
-                state = self.model.reuse(img0, img1, 1.0)
+                # Overlap reuse: the previous pair's second-frame features are
+                # this pair's first-frame features when the frames are the same
+                # object. Any other case (first pair, duplicate skip, scene
+                # cut, different caller) fails the identity check and extracts
+                # from scratch.
+                feat0 = None
+                if (
+                    previous_feature_state is not None
+                    and previous_feature_state.get("frame") is frame_a
+                ):
+                    feat0 = (
+                        previous_feature_state["feat21"],
+                        previous_feature_state["feat22"],
+                        previous_feature_state["feat23"],
+                    )
+                state = self.model.reuse(img0, img1, 1.0, feat0=feat0)
                 outputs = [
                     self._to_numpy(
                         self.model.inference(img0, img1, *state, timestep)[:, :, :height, :width]
@@ -192,13 +215,14 @@ class GmfssBackend:
                     for timestep in timesteps
                 ]
 
-        # Collect feature state from the reuse output for overlap reuse.
-        # The reuse() method returns (flow01, flow10, metric0, metric1, feat11, feat12, feat13, feat21, feat22, feat23).
-        # Return feature state of img1 (second frame) for reuse by the next overlapping pair.
+        # reuse() returns (flow01, flow10, metric0, metric1,
+        # feat11, feat12, feat13, feat21, feat22, feat23). The reusable half is
+        # the second frame's: pair N's img1 is pair N+1's img0.
         feature_state = {
-            "feat11": state[4] if len(state) > 4 else None,
-            "feat12": state[5] if len(state) > 5 else None,
-            "feat13": state[6] if len(state) > 6 else None,
+            "frame": frame_b,
+            "feat21": state[7],
+            "feat22": state[8],
+            "feat23": state[9],
         }
         return outputs, feature_state
 
