@@ -43,6 +43,26 @@ ATTENTION_IMPL = "sdpa"
 # picks a different reduction order. Set from [model] fusion_layout.
 CHANNELS_LAST_FUSION = True
 
+# Query rows per band in the two global `softmax(q k^T) v` products in GMFlow
+# (the correlation and the first flow-attention step). 0 keeps the upstream path,
+# which materialises the whole [B, L, L] matrix. Neither the softmax (along the
+# key axis) nor the final matmul (over the same axis) mixes query rows, so bands
+# of rows give the same numbers with a band * L working set instead of L * L.
+#
+# The global matching scale is 1/16 at 1080p (8160 positions), so that matrix is
+# only 133 MB per direction and is not by itself an out-of-memory risk. What the
+# bands fix is speed: a bidirectional pass builds two of them at once and,
+# unbanded, measures 1468 ms/pair against 1178 for two separate passes, while
+# banded it measures 1091 (chunk 128/256/512/1024 = 1315/1078/1076/1066).
+GLOBAL_MATCH_CHUNK = 1024
+
+# Predict both flow directions in one pass over the flow network, so the feature
+# extractor and the first transformer run once instead of twice. The cost is
+# memory: every 1/8-resolution intermediate is doubled, taking the measured peak
+# from 2.7 to 5.6 GiB on the 1080p test pair. The backend sets this from
+# [model] flow_pass before any forward pass; False keeps the upstream behaviour.
+BIDIR_FLOW = False
+
 
 def warp(tenInput, tenFlow):
     k = (str(tenFlow.device), str(tenFlow.size()))
@@ -761,10 +781,10 @@ class FeatureFlowAttention(nn.Module):
 
         value = flow.view(b, flow.size(1), h * w).permute(0, 2, 1)  # [B, H*W, 2]
 
-        scores = torch.matmul(query, key.permute(0, 2, 1)) / (c**0.5)  # [B, H*W, H*W]
-        prob = torch.softmax(scores, dim=-1)
-
-        out = torch.matmul(prob, value)  # [B, H*W, 2]
+        # [B, H*W, 2], banded when GLOBAL_MATCH_CHUNK is set. This is the second
+        # place in GMFlow that is quadratic in the number of feature positions;
+        # see the flag comment for why banding is exact.
+        out = global_softmax_average(query, key, value, GLOBAL_MATCH_CHUNK)
         out = out.view(b, h, w, value.size(-1)).permute(0, 3, 1, 2)  # [B, 2, H, W]
 
         return out
@@ -868,6 +888,79 @@ def global_correlation_softmax(
     flow = correspondence - init_grid
 
     return flow, prob
+
+
+def global_softmax_average(query, key, value, chunk=0):
+    """``softmax(query @ key^T / sqrt(d)) @ value``, optionally in bands.
+
+    ``query`` is [.., L, d], ``key`` is [.., L, d] and ``value`` is [.., L, e],
+    so the result is [.., L, e]: the usual cross-attention shape.
+
+    GMFlow computes this shape several times - the global correlation, the first
+    flow-attention step, and the upstream reference of each - and every one of
+    them writes the full [B, L, L] score matrix, which is quadratic in the number
+    of feature positions.
+
+    Softmax normalises along the key axis and the final matmul reduces over the
+    same axis, so neither step mixes query rows. Splitting the query rows into
+    bands leaves every output row identical in meaning and bounds the temporary
+    by ``chunk * L`` instead of ``L * L``. ``chunk <= 0`` keeps the single-shot
+    expression.
+    """
+    scale = query.shape[-1] ** 0.5
+    rows = query.shape[-2]
+
+    if chunk <= 0 or chunk >= rows:
+        scores = torch.matmul(query, key.transpose(-1, -2)) / scale
+        return torch.matmul(torch.softmax(scores, dim=-1), value)
+
+    bands = []
+    for start in range(0, rows, chunk):
+        band = torch.matmul(query[..., start : start + chunk, :], key.transpose(-1, -2))
+        bands.append(torch.matmul(torch.softmax(band / scale, dim=-1), value))
+    return torch.cat(bands, dim=-2)
+
+
+def global_correlation_softmax_chunked(
+    feature0,
+    feature1,
+    pred_bidir_flow=False,
+    chunk=None,
+):
+    """Row-banded equivalent of :func:`global_correlation_softmax`, flow only.
+
+    The upstream version materialises the whole [B, H*W, H*W] correlation matrix
+    and also returns the probability matrix. GMFlow only ever consumes the flow
+    (``[0]`` at the call site), and holding the probabilities would defeat the
+    purpose of banding, so this returns the flow alone.
+    """
+    chunk = int(chunk or GLOBAL_MATCH_CHUNK)
+    if chunk < 0:
+        raise ValueError("chunk must not be negative")
+
+    b, c, h, w = feature0.shape
+    queries = feature0.view(b, c, -1).permute(0, 2, 1)  # [B, H*W, C]
+    keys = feature1.view(b, c, -1)  # [B, C, H*W]
+
+    init_grid = coords_grid(b, h, w).to(queries.device)  # [B, 2, H, W]
+    grid = init_grid.view(b, 2, -1).permute(0, 2, 1)  # [B, H*W, 2]
+
+    if pred_bidir_flow:
+        # The backward matrix is the transpose of the forward one, so queries
+        # and keys swap roles. Take both originals before either is replaced.
+        backward_queries = keys.permute(0, 2, 1)  # [B, H*W, C]
+        backward_keys = feature0.view(b, c, -1)  # [B, C, H*W]
+        queries = torch.cat((queries, backward_queries), 0)  # [2B, H*W, C]
+        keys = torch.cat((keys, backward_keys), 0)  # [2B, C, H*W]
+        grid = grid.repeat(2, 1, 1)  # [2B, H*W, 2]
+        init_grid = init_grid.repeat(2, 1, 1, 1)  # [2B, 2, H, W]
+        b = b * 2
+
+    correspondence = global_softmax_average(
+        queries, keys.transpose(-1, -2), grid, chunk
+    )
+    correspondence = correspondence.view(b, h, w, 2).permute(0, 3, 1, 2)
+    return correspondence - init_grid
 
 
 def local_correlation_softmax(
@@ -1353,9 +1446,14 @@ class GMFlow(nn.Module):
 
             # correlation and softmax
             if corr_radius == -1:  # global matching
-                flow_pred = global_correlation_softmax(
-                    feature0, feature1, pred_bidir_flow
-                )[0]
+                if GLOBAL_MATCH_CHUNK > 0:
+                    flow_pred = global_correlation_softmax_chunked(
+                        feature0, feature1, pred_bidir_flow
+                    )
+                else:
+                    flow_pred = global_correlation_softmax(
+                        feature0, feature1, pred_bidir_flow
+                    )[0]
             else:  # local matching
                 flow_pred = local_correlation_softmax(feature0, feature1, corr_radius)[
                     0
@@ -1770,13 +1868,18 @@ class Model:
         else:
             imgf0 = img0
             imgf1 = img1
-        # Two unidirectional passes. A single pred_bidir_flow pass would be
-        # ~14% faster, but it concatenates both directions into one
-        # [2*B, HW, HW] global-correlation matrix (4.26 GB at 1080p fp16), which
-        # does not fit on an 8 GB card. Do not switch this without chunking that
-        # correlation.
-        flow01 = self.flownet(imgf0, imgf1, return_flow=True)
-        flow10 = self.flownet(imgf1, imgf0, return_flow=True)
+        # One pass predicts both directions when BIDIR_FLOW is set: the feature
+        # extractor and the first transformer then run once instead of twice,
+        # and the doubled correlation matrix is produced in bands. The separate
+        # path is kept because it needs no banding and is the reference for
+        # output comparisons.
+        if BIDIR_FLOW:
+            flows = self.flownet(imgf0, imgf1, pred_bidir_flow=True)
+            flow01 = flows[0:1]
+            flow10 = flows[1:2]
+        else:
+            flow01 = self.flownet(imgf0, imgf1, return_flow=True)
+            flow10 = self.flownet(imgf1, imgf0, return_flow=True)
         if scale != 1.0:
             flow01 = (
                 F.interpolate(

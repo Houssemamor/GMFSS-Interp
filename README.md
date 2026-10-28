@@ -136,6 +136,7 @@ target_fps = 119.88
 | `gpu_index` | Which GPU to use when more than one is present. |
 | `attention` | `"sdpa"` (default) uses PyTorch's fused attention inside GMFlow; `"reference"` runs the original matmul/softmax code. Same result up to rounding, ~9% slower. |
 | `fusion_layout` | `"channels_last"` (default) runs the fusion network on cudnn's NHWC path, ~3% faster at 1080p; `"nchw"` keeps the original layout. The two differ by at most one 8-bit level. |
+| `flow_pass` | `"bidir"` (default) predicts both flow directions in one pass, ~5% faster as a paired A/B; `"separate"` runs the network twice and keeps the original peak (2.7 vs 5.6 GiB at 1080p). Same flow up to rounding. |
 
 ### `[dedup]` - do not waste time on repeated frames
 
@@ -279,9 +280,11 @@ Practical notes:
 * If a run dies with a CUDA out-of-memory error, set `precision = "fp16"` first,
   then close other GPU applications. 8 GB is the practical floor at 1080p.
 * Scene detection costs almost nothing and removes the worst artefacts; keep it on.
-* Optional headroom on 8 GB cards: GMFlow can predict both flow directions in a
-  single pass, which is another ~5% (measured), but it needs a 4.3 GB temporary
-  correlation matrix and does not fit alongside everything else. It stays off.
+* Optional headroom on 8 GB cards: `flow_pass = "bidir"` is on by default and
+  measured ~5% faster as a paired A/B. Its cost is memory, not a temporary
+  matrix: doubling the flow batch takes the measured peak from 2.7 to 5.6 GiB
+  on a 1080p pair. If a run runs close to the VRAM limit, set
+  `flow_pass = "separate"`.
 
 ---
 
@@ -375,7 +378,7 @@ ComfyUI device helpers. It is vendored rather than installed so a ComfyUI update
 cannot silently change model behaviour.
 
 Local changes to the vendored copy. The first four are cosmetic or packaging,
-the last three are performance changes, two of which have a matching switch in
+the rest are performance changes; two of them have a matching switch in
 `[model]`:
 
 * `comfy/model_management.py` is a three-function stand-in for the ComfyUI
@@ -403,6 +406,20 @@ the last three are performance changes, two of which have a matching switch in
   end-to-end at 1080p, paired A/B). The concatenated formulation is kept for
   autograd, because the vendored backward kernels are written against it, and
   `tests/test_softsplat.py` pins the two against each other.
+* The two global `softmax(q k^T) v` products in GMFlow (the correlation and the
+  first flow-attention step) go through `global_softmax_average`, which computes
+  the result in bands of query rows when `GLOBAL_MATCH_CHUNK` is set. The softmax
+  runs along the key axis and the final matmul reduces over the same axis, so
+  banding is exact; it bounds the temporary by `chunk * L` instead of `L * L`.
+  `tests/test_flow_match.py` pins the banded result against the single-shot
+  expression and the upstream correlation function.
+* `Model.reuse` can predict both flow directions in one pass (`BIDIR_FLOW`, set
+  from `[model] flow_pass`), so the feature extractor and the first transformer
+  run once instead of twice (~5% end-to-end at 1080p, paired A/B). The
+  bidirectional correlation matrix is built by
+  `global_correlation_softmax_chunked`, which stacks the transposed matrix for
+  the backward direction; the doubled batch is why the flow stage peaks at
+  5.6 GiB instead of 2.7 GiB.
 
 ## Credits and licences
 
