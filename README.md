@@ -29,6 +29,39 @@ RIFE, and it is the right trade for this content.
 
 ---
 
+## Comparison
+
+![Original at 23.976 fps (left) next to GMFSS 3x at 71.928 fps (right)](docs/comparison.webp)
+
+**Left:** the original, 23.976 fps. **Right:** the same four seconds interpolated
+3x to 71.928 fps. Both sides are shown at the same playback rate, so the left
+side steps visibly while the right side glides.
+
+| | |
+| --- | --- |
+| Clip | 4 s of 1080p anime, a fight scene with fast character and effect motion |
+| Settings | the defaults in `config.toml`: `factor = 3`, `precision = "fp16"`, `flow_pass = "bidir"`, HEVC NVENC quality 18 |
+| Render time | 2.4 min for 94 pairs (about 1.5 s per pair on this machine) |
+| Preview | downscaled to 480x270 per side and compressed as animated WebP, so the preview is softer than the real output |
+
+### Slow motion
+
+![Same clip at one sixth speed: original (left) and GMFSS 3x (right)](docs/comparison_slowmo.webp)
+
+The same clip at one sixth speed (24 s). The left side plays at about 4 fps and
+the right side at about 12 fps, well under browser frame-rate caps. Each
+original frame is held for three frames on the left, while the right shows the
+two extra frames GMFSS synthesised in between. This is
+the view to use for judging interpolation artefacts such as ghosting around
+fast-moving hands and effects.
+
+The animation is a preview of motion smoothness, not of picture quality. Some
+browsers and image viewers cap animated playback below 72 fps, which makes the
+difference look smaller than it is. Playing the actual output file in a video
+player shows it properly.
+
+---
+
 ## Requirements
 
 | Item | Detail |
@@ -370,6 +403,7 @@ GMFSS-Interp/
     pipeline.py          streaming decode -> interpolate -> encode
     download_models.py   checkpoint downloader
   tests/                 unit tests (no GPU needed)
+  docs/                  comparison animations used by this README
   vendor/                GMFSS architecture + softsplat operators (MIT)
   models/                checkpoints (downloaded)
   tools/                 ffmpeg + ffprobe (bundled by setup.bat), optional mkv/
