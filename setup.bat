@@ -20,23 +20,11 @@ where ffmpeg >nul 2>nul && set "HAVE_FFMPEG=1"
 if exist "tools\ffmpeg.exe" set "HAVE_FFMPEG=1"
 if defined HAVE_FFMPEG (
     echo       ffmpeg already available
-) else (
-    echo       Downloading a static ffmpeg build ^(about 110 MB^)
-    if not exist "tools" mkdir "tools"
-    curl.exe -L --retry 3 --retry-delay 5 -o "tools\ffmpeg.zip" ^
-        "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
-    if errorlevel 1 goto :ffmpeg_failed
-    if not exist "tools\unpack" mkdir "tools\unpack"
-    tar -xf "tools\ffmpeg.zip" -C "tools\unpack"
-    if errorlevel 1 goto :ffmpeg_failed
-    for /r "tools\unpack" %%F in (ffmpeg.exe) do copy /y "%%F" "tools\ffmpeg.exe" >nul
-    for /r "tools\unpack" %%F in (ffprobe.exe) do copy /y "%%F" "tools\ffprobe.exe" >nul
-    rmdir /s /q "tools\unpack"
-    del "tools\ffmpeg.zip"
-    if not exist "tools\ffmpeg.exe" goto :ffmpeg_failed
-    if not exist "tools\ffprobe.exe" goto :ffmpeg_failed
-    echo       Installed to tools\
+    goto :venv
 )
+
+call :install_ffmpeg
+if errorlevel 1 goto :ffmpeg_failed
 goto :venv
 
 :ffmpeg_failed
@@ -87,7 +75,7 @@ rem ------------------------------------------------------------- 3. pytorch
 echo.
 echo [3/5] PyTorch with CUDA 12.6 (about 2.4 GB on first install)
 "%PY%" -m pip install --upgrade pip
-"%PY%" -m pip install torch --index-url https://download.pytorch.org/whl/cu126
+"%PY%" -m pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cu126
 if errorlevel 1 (
     echo       FAILED: PyTorch installation did not complete
     pause
@@ -97,9 +85,9 @@ if errorlevel 1 (
 rem --------------------------------------------------------- 4. other deps
 echo.
 echo [4/5] Supporting packages (cupy + CUDA headers, about 1.5 GB)
-"%PY%" -m pip install numpy "cupy-cuda12x[ctk]"
+"%PY%" -m pip install -r requirements.txt
 if errorlevel 1 (
-    echo       FAILED: could not install numpy / cupy
+    echo       FAILED: could not install the packages in requirements.txt
     pause
     exit /b 1
 )
@@ -137,3 +125,37 @@ echo.
 echo Setup complete. Drag a video file onto Interpolate.bat.
 pause
 exit /b 0
+
+rem ------------------------------------------------- subroutine: ffmpeg install
+rem Kept outside any parenthesised block on purpose: %VAR% is expanded when a
+rem whole block is parsed, so a variable set inside a block would read as empty.
+:install_ffmpeg
+echo       Downloading ffmpeg 7.0 ^(about 90 MB^)
+if not exist "tools" mkdir "tools"
+rem A version-pinned URL plus a SHA-256 check: the moving "release" URL cannot
+rem be verified, and an unverified binary would run with this user's rights.
+set "FFMPEG_SHA256=3333a744e1585375aef46f2055ea483d002de52bf8bf445638b80e1d86a2521e"
+curl.exe -L --retry 3 --retry-delay 5 -o "tools\ffmpeg.zip" "https://github.com/GyanD/codexffmpeg/releases/download/7.0/ffmpeg-7.0-essentials_build.zip"
+if errorlevel 1 exit /b 1
+set "ZIPHASH="
+for /f "skip=1 tokens=*" %%H in ('certutil -hashfile "tools\ffmpeg.zip" SHA256') do if not defined ZIPHASH set "ZIPHASH=%%H"
+set "ZIPHASH=%ZIPHASH: =%"
+if /i not "%ZIPHASH%"=="%FFMPEG_SHA256%" goto :install_ffmpeg_bad_hash
+if not exist "tools\unpack" mkdir "tools\unpack"
+tar -xf "tools\ffmpeg.zip" -C "tools\unpack"
+if errorlevel 1 exit /b 1
+rem dir /s lists only files that exist; "for /r" with a bare name would visit
+rem every folder whether or not the file is there.
+for /f "delims=" %%F in ('dir /s /b "tools\unpack\ffmpeg.exe"') do copy /y "%%F" "tools\ffmpeg.exe" >nul
+for /f "delims=" %%F in ('dir /s /b "tools\unpack\ffprobe.exe"') do copy /y "%%F" "tools\ffprobe.exe" >nul
+rmdir /s /q "tools\unpack"
+del "tools\ffmpeg.zip"
+if not exist "tools\ffmpeg.exe" exit /b 1
+if not exist "tools\ffprobe.exe" exit /b 1
+echo       Installed to tools\
+exit /b 0
+
+:install_ffmpeg_bad_hash
+echo       SHA-256 mismatch for the ffmpeg download; discarding it.
+del "tools\ffmpeg.zip"
+exit /b 1

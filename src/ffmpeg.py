@@ -130,6 +130,20 @@ def resolve_tools(paths: config_module.PathConfig, root: pathlib.Path) -> Tools:
     )
 
 
+# ffprobe colour_space name -> swscale out_color_matrix name. Sources with any
+# other value (including untagged) get no explicit matrix: decode and encode
+# then both use swscale's default, so the round trip stays self-consistent and
+# the output stays untagged, exactly like the source.
+_SCALE_MATRIX = {
+    "bt709": "bt709",
+    "bt470bg": "bt470",
+    "smpte170m": "smpte170m",
+    "smpte240m": "smpte240m",
+    "fcc": "fcc",
+    "bt2020nc": "bt2020",
+}
+
+
 def rate_string(rate: Fraction) -> str:
     """Format a Fraction the way ffmpeg expects (e.g. 120000/1001)."""
     return f"{rate.numerator}/{rate.denominator}"
@@ -153,7 +167,8 @@ def build_decode_command(
         "-i", str(source),
         "-map", "0:v:0",
         "-an", "-sn", "-dn",
-        "-vsync", "cfr",
+        # -fps_mode replaces the deprecated -vsync (ffmpeg 5.1+).
+        "-fps_mode", "cfr",
         "-r", rate_string(source_rate),
         "-f", "rawvideo",
         "-pix_fmt", "rgb24",
@@ -218,6 +233,14 @@ def build_encode_command(
         "-i", str(info.path),
         "-map", "0:v:0",
     ]
+
+    # The pipe carries RGB, so the encoder's RGB->YUV conversion must use the
+    # same matrix the decoder used (taken from the source's tags) and match the
+    # colourspace tag written below. Without this swscale falls back to BT.601
+    # while the output is tagged BT.709, shifting saturated colours.
+    matrix = _SCALE_MATRIX.get((info.video.color_space or "").lower())
+    if matrix is not None:
+        command += ["-vf", f"scale=out_color_matrix={matrix}"]
 
     if not video_only:
         if mux.preserve_audio and info.has_audio:

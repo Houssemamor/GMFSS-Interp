@@ -1,10 +1,17 @@
-# torch is installed by setup.bat from the CUDA wheel index, because the default
-# PyPI wheel is the CPU build:
-#   .venv\Scripts\python.exe -m pip install torch --index-url https://download.pytorch.org/whl/cu126
+# Pinned to the versions this project was developed and tested against.
+# setup.bat installs torch first (from the CUDA wheel index, because the default
+# PyPI wheel is the CPU build) and then runs:
+#   .venv\Scripts\python.exe -m pip install -r requirements.txt
+#
+# torch (installed by setup.bat, version pinned there):
+#   .venv\Scripts\python.exe -m pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cu126
+#
+# Transitive dependencies are not hash-locked. To update a pin, change it here
+# and run the test suite before committing.
 
-numpy
+numpy==2.5.4
 
 # The [ctk] extra is required, not optional: cupy compiles the softsplat kernels
 # at runtime with NVRTC, which needs the CUDA headers and libraries.
 # Without it the first inference fails with "Failed to find CUDA headers".
-cupy-cuda12x[ctk]
+cupy-cuda12x[ctk]==14.2.0

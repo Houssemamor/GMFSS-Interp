@@ -25,12 +25,24 @@ warnings.filterwarnings("ignore", category=UserWarning, message=r".*CUDA path co
 from . import backend_gmfss
 from . import config as config_module
 from . import ffmpeg as ffmpeg_module
+from . import mux as mux_module
 from . import pipeline as pipeline_module
 from . import probe as probe_module
 
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_INTERRUPTED = 130
+
+
+# Errors caused by one input file. In a batch they are reported and the next
+# file is still processed. Tool and backend errors are environment-wide, so
+# they abort the whole run instead.
+_PER_FILE_ERRORS: tuple[tuple[type[Exception], str], ...] = (
+    (pipeline_module.PipelineError, "ERROR"),
+    (probe_module.ProbeError, "PROBE ERROR"),
+    (mux_module.MuxError, "MUX ERROR"),
+    (config_module.ConfigError, "CONFIG ERROR"),
+)
 
 
 def _project_root() -> pathlib.Path:
@@ -87,26 +99,32 @@ def main(argv: list[str] | None = None) -> int:
         # module imports torch inside GmfssBackend.load.
         os.environ["CUDA_VISIBLE_DEVICES"] = str(config.model.gpu_index)
 
+        failed: list[str] = []
         for source in args.inputs:
             if len(args.inputs) > 1:
                 print("=" * 78)
-            _run_one(config, pathlib.Path(source), args.dry_run)
+            try:
+                _run_one(config, pathlib.Path(source), args.dry_run)
+            except tuple(kind for kind, _label in _PER_FILE_ERRORS) as error:
+                label = next(text for kind, text in _PER_FILE_ERRORS if isinstance(error, kind))
+                print(f"{label}: {error}", file=sys.stderr)
+                failed.append(source)
+
+        if failed:
+            print(f"\n{len(failed)} of {len(args.inputs)} file(s) failed:", file=sys.stderr)
+            for source in failed:
+                print(f"  {source}", file=sys.stderr)
+            return EXIT_ERROR
         return EXIT_OK
 
     except KeyboardInterrupt:
         print("\nInterrupted. Partial output removed.")
         return EXIT_INTERRUPTED
-    except pipeline_module.PipelineError as error:
-        print(f"ERROR: {error}", file=sys.stderr)
-        return EXIT_ERROR
     except config_module.ConfigError as error:
         print(f"CONFIG ERROR: {error}", file=sys.stderr)
         return EXIT_ERROR
     except ffmpeg_module.ToolError as error:
         print(f"TOOL ERROR: {error}", file=sys.stderr)
-        return EXIT_ERROR
-    except probe_module.ProbeError as error:
-        print(f"PROBE ERROR: {error}", file=sys.stderr)
         return EXIT_ERROR
     except backend_gmfss.BackendError as error:
         print(f"BACKEND ERROR: {error}", file=sys.stderr)

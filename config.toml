@@ -45,11 +45,9 @@ fusion_layout = "channels_last"
 # share them. A bidirectional pass saves the second pass (~6% measured) but
 # doubles peak VRAM at the 1/8 scale feature stage (~2.7 -> ~5.6 GiB on a test
 # pair) because the feature tensors, not the correlation matrix, dominate.
-# Only available with chunked matching (default: chunk 1024). "separate"
-# is the original two-pass behaviour.
-# Note: this feature requires chunked matching; the reference implementation
-# (pred_bidir_flow) creates a 4.26 GB transient correlation matrix that OOMs
-# on 8 GB cards. The chunked path is what makes bidirectional live.
+# Uses chunked global matching (chunk 1024), which is what makes bidir faster
+# than two separate passes. "separate" is the original two-pass behaviour and
+# keeps peak VRAM low; use it for inputs larger than 1080p on an 8 GB card.
 flow_pass = "bidir"
 
 

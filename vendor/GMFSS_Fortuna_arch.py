@@ -1838,14 +1838,17 @@ class Model:
             self.fusionnet.to(memory_format=torch.channels_last)
 
     def load_model(self, path_dict):
+        # Local change from upstream: weights_only=True restricts unpickling to
+        # tensors and plain containers, so a tampered checkpoint cannot execute
+        # code. The checkpoints are plain state dicts and load unchanged.
         #models/GMFSS_fortuna_flownet.pkl
-        self.flownet.load_state_dict(torch.load(path_dict["flownet"]))
+        self.flownet.load_state_dict(torch.load(path_dict["flownet"], weights_only=True))
         #models/GMFSS_fortuna_metric.pkl
-        self.metricnet.load_state_dict(torch.load(path_dict["metricnet"]))
+        self.metricnet.load_state_dict(torch.load(path_dict["metricnet"], weights_only=True))
         #models/GMFSS_fortuna_feat.pkl
-        self.feat_ext.load_state_dict(torch.load(path_dict["feat_ext"]))
+        self.feat_ext.load_state_dict(torch.load(path_dict["feat_ext"], weights_only=True))
         #models/GMFSS_fortuna_fusionnet.pkl
-        self.fusionnet.load_state_dict(torch.load(path_dict["fusionnet"]))
+        self.fusionnet.load_state_dict(torch.load(path_dict["fusionnet"], weights_only=True))
 
     def reuse(self, img0, img1, scale, feat0=None):
         # feat0: optional (feat11, feat12, feat13) already extracted from img0,

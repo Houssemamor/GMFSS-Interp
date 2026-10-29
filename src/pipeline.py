@@ -42,6 +42,14 @@ class PipelineError(RuntimeError):
     """Raised when a stage of the pipeline fails."""
 
 
+class EncoderClosedError(PipelineError):
+    """Raised when the encoder's stdin closes while frames are still being sent.
+
+    The real cause (bad pixel format, missing encoder, no GPU session) is only
+    in the encoder log, so ``run`` replaces this with a message quoting it.
+    """
+
+
 @dataclasses.dataclass(frozen=True)
 class Plan:
     """Everything decided before the first frame is touched."""
@@ -114,8 +122,13 @@ def _resolve_muxer(config: config_module.Config, tools: ffmpeg_module.Tools) -> 
     mkvmerge is preferred whenever it is installed because it copies font
     attachments more reliably than ffmpeg. An explicit request for it fails
     fast here, before the model is loaded, instead of after the render.
+
+    mkvmerge only writes Matroska, so "auto" falls back to ffmpeg for any other
+    container; otherwise the output would be MKV data under a .mp4 name.
     """
     if config.mux.muxer == "ffmpeg":
+        return "ffmpeg"
+    if config.mux.muxer == "auto" and config.encode.container != "mkv":
         return "ffmpeg"
     if tools.mkvmerge is not None:
         return "mkvmerge"
@@ -204,7 +217,11 @@ class _FrameSink:
         # write copies into its own buffer anyway, so tobytes() only added a
         # second 6 MB copy per frame. cast("B") flattens the shape and asserts
         # C-contiguity, which every frame this sink receives satisfies.
-        self._stream.write(memoryview(frame).cast("B"))
+        try:
+            self._stream.write(memoryview(frame).cast("B"))
+        except OSError as error:
+            # BrokenPipeError (and Windows' EINVAL variant) means ffmpeg exited.
+            raise EncoderClosedError(f"Encoder input closed unexpectedly: {error}") from error
 
     def close(self) -> None:
         if self._stream is not None:
@@ -411,7 +428,7 @@ def run(
             decoder_code = decoder.wait()
             encoder_code = encoder.wait()
 
-        except BaseException:
+        except BaseException as failure:
             # Any failure (including Ctrl+C) must not leave orphan processes or
             # a partial file behind.
             for process in (decoder, encoder):
@@ -420,6 +437,10 @@ def run(
                 process.wait()
             temp_output.unlink(missing_ok=True)
             temp_video.unlink(missing_ok=True)
+            if isinstance(failure, EncoderClosedError):
+                raise PipelineError(
+                    f"The encoder stopped early. Last messages:\n{_tail(encoder_log)}"
+                ) from failure
             raise
         finally:
             source.close()
