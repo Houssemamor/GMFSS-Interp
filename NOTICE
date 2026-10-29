@@ -1,0 +1,99 @@
+GMFSS-Interp
+Copyright (c) 2026 Houssemamor
+
+This project bundles third-party code in vendor/ and depends on third-party
+model weights. This file lists each component, its origin, its licence and what
+was changed. Full licence texts are in LICENSES/.
+
+This is a good-faith summary, not legal advice. If you plan commercial use,
+read the upstream licences yourself and contact the authors where noted.
+
+
+1. ORIGINAL CODE (MIT)
+
+   src/, tests/, setup.bat, Interpolate.bat, config.toml and the documentation
+   are licensed under the MIT licence in LICENSE.
+
+
+2. VENDORED CODE
+
+   2.1 vendor/GMFSS_Fortuna_arch.py
+       Origin:  https://github.com/98mxr/GMFSS_Fortuna (commit b5d0bd54),
+                assembled by the ComfyUI-Frame-Interpolation project.
+       Licence: MIT, Copyright (c) 2023 98mxr.
+                See LICENSES/GMFSS_Fortuna-MIT.txt.
+       Changes: this project added the attention, GridNet layout and flow-pass
+                switches, banded global matching, bidirectional flow, feature
+                reuse (Model.reuse feat0) and weights_only checkpoint loading.
+
+       This file also contains code derived from other projects:
+       - GMFlow, https://github.com/haofeixu/gmflow
+         Apache License 2.0, Copyright 2022 Haofei Xu.
+         See LICENSES/GMFlow-Apache-2.0.txt. The file was modified as listed
+         above, as the Apache licence requires this notice to state.
+       - RIFE IFNet (IFNet_HDv3), https://github.com/hzwer/Practical-RIFE
+         MIT, Copyright (c) 2021 hzwer. See LICENSES/Practical-RIFE-MIT.txt.
+
+   2.2 vendor/vfi_models/rife/rife_arch.py
+       Origin:  https://github.com/hzwer/Practical-RIFE and
+                https://github.com/HolyWu/vs-rife
+       Licence: MIT, Copyright (c) 2021 hzwer and Copyright (c) 2021 HolyWu.
+                See LICENSES/Practical-RIFE-MIT.txt and LICENSES/vs-rife-MIT.txt.
+
+   2.3 vendor/vfi_models/ops/ and vendor/comfy/
+       Origin:  https://github.com/Fannovel16/ComfyUI-Frame-Interpolation
+       Licence: MIT, Copyright (c) 2023 Fannovel16.
+                See LICENSES/ComfyUI-Frame-Interpolation-MIT.txt.
+       Changes: the ops package was reduced to the CuPy backend with a
+                standalone init(); vendor/comfy/ is a minimal stand-in for the
+                ComfyUI module of the same name. cupy_ops/softsplat.py gained
+                softsplat_weighted_out (weights applied inside the kernel).
+
+       NON-COMMERCIAL COMPONENTS. These files wrap CUDA kernels written by
+       Simon Niklaus and published in repositories whose README states: "The
+       provided implementation is strictly for academic purposes only. Should
+       you be interested in using our technology for any commercial use,
+       please feel free to contact us."
+         - cupy_ops/softsplat.py   https://github.com/sniklaus/softmax-splatting
+         - cupy_ops/sepconv.py     https://github.com/sniklaus/pytorch-sepconv
+         - cupy_ops/costvol.py, cupy_ops/correlation.py
+           these appear to come from Niklaus' PyTorch re-implementations of
+           optical-flow networks (for example sniklaus/pytorch-pwc), based on
+           their coding style and kernel names. Their READMEs say the underlying
+           models are free for non-commercial use only. The exact origin was not
+           verified.
+         - cupy_ops/batch_edt.py   origin not identified; treat as unverified.
+       These repositories carry no licence file. Treat these files as
+       restricted to academic and personal, non-commercial use, and cite:
+         S. Niklaus and F. Liu, "Softmax Splatting for Video Frame
+         Interpolation", CVPR 2020, https://arxiv.org/abs/2003.05534
+
+       cupy_ops/adacof.py is derived from https://github.com/HyeongminLEE/AdaCoF-pytorch
+       (MIT, see LICENSES/AdaCoF-pytorch-MIT.txt).
+
+       Only softsplat.py is used by the GMFSS pipeline at run time. The other
+       kernels are carried over from the ComfyUI package and are not needed.
+
+
+3. MODEL WEIGHTS (not included in this repository)
+
+   src/download_models.py fetches the GMFSS Fortuna checkpoints at setup time
+   from https://github.com/styler00dollar/VSGAN-tensorrt-docker/releases (that
+   repository is BSD-3-Clause). The weights come from
+   https://github.com/98mxr/GMFSS_Fortuna and are distributed by their authors
+   for research and personal use. Their terms apply to the weights, not the
+   MIT licence of this project. Verify them before commercial use.
+
+
+4. EXTERNAL TOOLS (downloaded, not included)
+
+   ffmpeg (GPL build from gyan.dev, fetched by setup.bat) and optionally
+   MKVToolNix (GPL-2.0). They run as separate programs and are not linked into
+   this project.
+
+
+5. PYTHON DEPENDENCIES (installed, not included)
+
+   PyTorch (BSD-3-Clause), NumPy (BSD-3-Clause), CuPy (MIT) and the NVIDIA CUDA
+   libraries pulled in by cupy-cuda12x[ctk] and torch, which are covered by the
+   NVIDIA CUDA licence agreement.

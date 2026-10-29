@@ -481,3 +481,11 @@ the rest are performance changes; three of them have a matching switch in
 
 The model weights are distributed by their authors for research and personal
 use. Check their terms before using this pipeline for anything commercial.
+
+### Licence
+
+The original code (`src/`, `tests/`, the batch files and the docs) is MIT, see
+[`LICENSE`](LICENSE). The code under `vendor/` keeps its authors' licences, and
+the softsplat and related CUDA kernels by Simon Niklaus are **for academic and
+non-commercial use only**. [`NOTICE`](NOTICE) lists every component, its
+licence and what was changed; the licence texts are in [`LICENSES/`](LICENSES/).
