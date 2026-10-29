@@ -30,6 +30,8 @@ class VideoTrack:
     color_primaries: str | None
     color_transfer: str | None
     color_space: str | None
+    # Container start time of the video stream in seconds. Zero when unknown.
+    start_seconds: float = 0.0
 
     @property
     def is_variable_rate(self) -> bool:
@@ -74,6 +76,16 @@ def _fraction(value: str | None) -> Fraction:
         return Fraction(value)
     except (ValueError, ZeroDivisionError):
         return Fraction(0)
+
+
+def _start_seconds(value: object) -> float:
+    """Parse ffprobe's start_time (a decimal string or N/A) into seconds."""
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.0
+    # float() accepts "nan" and "inf"; neither is a usable offset.
+    return number if number == number and abs(number) != float("inf") else 0.0
 
 
 def probe(ffprobe_path: pathlib.Path, media_path: pathlib.Path) -> MediaInfo:
@@ -135,6 +147,7 @@ def probe(ffprobe_path: pathlib.Path, media_path: pathlib.Path) -> MediaInfo:
         color_primaries=video.get("color_primaries"),
         color_transfer=video.get("color_transfer"),
         color_space=video.get("color_space"),
+        start_seconds=_start_seconds(video.get("start_time")),
     )
 
     subtitle_codecs = tuple(

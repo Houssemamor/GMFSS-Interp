@@ -144,6 +144,14 @@ _SCALE_MATRIX = {
 }
 
 
+# Largest video start time for which the decoder keeps source timestamps.
+# With -copyts the decoder pads the gap before the first frame with copies of
+# it, so a broadcast capture that starts at hour 1 would add an hour of frames.
+# Beyond this limit the old behaviour (timeline restarts at the first stream)
+# is used instead.
+MAX_PRESERVED_START_SECONDS = 2.0
+
+
 def rate_string(rate: Fraction) -> str:
     """Format a Fraction the way ffmpeg expects (e.g. 120000/1001)."""
     return f"{rate.numerator}/{rate.denominator}"
@@ -153,17 +161,27 @@ def build_decode_command(
     tools: Tools,
     source: pathlib.Path,
     source_rate: Fraction,
+    start_seconds: float = 0.0,
 ) -> list[str]:
     """Build the ffmpeg command that decodes the source to raw RGB24 on stdout.
 
     The source is forced to constant frame rate first: pair-based interpolation
     assumes evenly spaced frames, and many anime encodes are variable rate.
+
+    Source timestamps are kept (-copyts) because ffmpeg otherwise measures time
+    from the earliest stream in the file. Audio usually starts slightly before
+    zero (codec priming, e.g. -23 ms), which made the decoder insert a duplicate
+    first frame and left the video one frame late against the copied audio.
+    ``start_seconds`` is the video stream's start time; see
+    MAX_PRESERVED_START_SECONDS for when this is skipped.
     """
+    keep_timestamps = start_seconds <= MAX_PRESERVED_START_SECONDS
     return [
         str(tools.ffmpeg),
         "-hide_banner",
         "-nostdin",
         "-v", "error",
+        *(["-copyts"] if keep_timestamps else []),
         "-i", str(source),
         "-map", "0:v:0",
         "-an", "-sn", "-dn",

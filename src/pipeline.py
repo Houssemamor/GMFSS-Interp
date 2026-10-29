@@ -299,7 +299,7 @@ def run(
     encode_target = temp_video if video_only else temp_output
 
     decode_command = ffmpeg_module.build_decode_command(
-        plan.tools, plan.info.path, plan.source_rate
+        plan.tools, plan.info.path, plan.source_rate, plan.info.video.start_seconds
     )
     encode_command = ffmpeg_module.build_encode_command(
         plan.tools,

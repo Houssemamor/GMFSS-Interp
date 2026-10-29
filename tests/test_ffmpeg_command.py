@@ -76,6 +76,38 @@ class DecodeCommandTests(unittest.TestCase):
         self.assertIn("my episode 01.mkv", command)
 
 
+class DecodeTimestampTests(unittest.TestCase):
+    def decode(self, start_seconds: float) -> list[str]:
+        return ffmpeg_module.build_decode_command(
+            TOOLS, pathlib.Path("source.mkv"), Fraction(24000, 1001), start_seconds
+        )
+
+    def test_zero_start_keeps_source_timestamps(self) -> None:
+        command = self.decode(0.0)
+        self.assertIn("-copyts", command)
+        # -copyts is an input option, so it must precede the input it applies to.
+        self.assertLess(command.index("-copyts"), command.index("-i"))
+
+    def test_small_lead_in_keeps_source_timestamps(self) -> None:
+        self.assertIn("-copyts", self.decode(0.959))
+
+    def test_limit_is_inclusive(self) -> None:
+        limit = ffmpeg_module.MAX_PRESERVED_START_SECONDS
+        self.assertIn("-copyts", self.decode(limit))
+        self.assertNotIn("-copyts", self.decode(limit + 0.001))
+
+    def test_large_start_offset_falls_back(self) -> None:
+        # A capture starting at hour 1 would otherwise be padded with an hour of
+        # duplicate frames.
+        self.assertNotIn("-copyts", self.decode(3600.0))
+
+    def test_start_defaults_to_zero_for_old_callers(self) -> None:
+        command = ffmpeg_module.build_decode_command(
+            TOOLS, pathlib.Path("source.mkv"), Fraction(24)
+        )
+        self.assertIn("-copyts", command)
+
+
 class EncodeColourTests(unittest.TestCase):
     def test_bt709_source_converts_rgb_with_the_bt709_matrix(self) -> None:
         command = _encode("bt709")
